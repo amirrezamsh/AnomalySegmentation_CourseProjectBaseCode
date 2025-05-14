@@ -11,7 +11,6 @@ import os.path as osp
 from argparse import ArgumentParser
 from ood_metrics import fpr_at_95_tpr, calc_metrics, plot_roc, plot_pr,plot_barcode
 from sklearn.metrics import roc_auc_score, roc_curve, auc, precision_recall_curve, average_precision_score
-from sklearn.metrics import jaccard_score
 
 seed = 42
 
@@ -26,48 +25,18 @@ NUM_CLASSES = 20
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = True
 
-
-def compute_iou(pred, gt, num_classes=NUM_CLASSES):
-    """
-    Compute the IoU for each class and return the mean IoU.
-
-    :param pred: The predicted anomaly segmentation (binary mask).
-    :param gt: The ground truth segmentation mask.
-    :param num_classes: The number of classes in the dataset (usually 20 for Cityscapes).
-    :return: mean IoU value.
-    """
-    iou_list = []
-    for class_id in range(num_classes):
-        # Create binary masks for this class in both pred and gt
-        pred_class = (pred == class_id).astype(np.uint8)
-        gt_class = (gt == class_id).astype(np.uint8)
-        
-        intersection = np.sum(pred_class * gt_class)
-        union = np.sum(pred_class) + np.sum(gt_class) - intersection
-        
-        # Calculate IoU for this class
-        if union == 0:
-            iou_list.append(np.nan)  # No ground truth or prediction for this class
-        else:
-            iou_list.append(intersection / union)
-    
-    # Return the mean IoU, ignoring NaN values
-    return np.nanmean(iou_list)
-
-
-
-
-
 def main():
     parser = ArgumentParser()
     parser.add_argument(
     "--input",
-    default="D:/semester_3/AML/project/datasets/RoadObsticle21/images/*.webp",
+    default="D:/semester_3/AML/project/datasets/RoadAnomaly21/images/*.png",
     help="Glob pattern to match images"
 )
     parser.add_argument('--method', default='msp', choices=['msp', 'maxlogit', 'entropy'],
                     help="Anomaly scoring method: msp, maxlogit, or entropy")
-
+    
+    parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for scaling logits (used in MSP)')
+ 
     parser.add_argument('--loadDir',default="../trained_models/")
     parser.add_argument('--loadWeights', default="erfnet_pretrained.pth")
     parser.add_argument('--loadModel', default="erfnet.py")
@@ -93,8 +62,6 @@ def main():
         dataset = 'RoadAnomaly'
     elif 'RoadObsticle21' in args.input :
         dataset = 'RoadObsticle21'
-    
-    
 
 
     if not os.path.exists('results.txt'):
@@ -153,31 +120,52 @@ def main():
     if len(args.input) == 0:
         print("❌ No images found! Please check the --input path.")
         exit(1)
-
-    mIoU_list = []
-    # for path in glob.glob(os.path.expanduser(str(args.input[0]))):
+        # for path in glob.glob(os.path.expanduser(str(args.input[0]))):
     for path in args.input :
         print(path)
         images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
         images = images.permute(0,3,1,2)
         with torch.no_grad():
             result = model(images)
+            ##### first I tried this #####
+            # anomaly_result = 1.0 - np.max(result.squeeze(0).data.cpu().numpy(), axis=0)
+            ##### first I tried this #####
 
-        logits = result.squeeze(0).data.cpu().numpy()
+
+            logits = result.squeeze(0).data.cpu().numpy()
+
+
+            if args.method == "msp" :
+
+                temperature = getattr(args, 'temperature', 1.0)
+                # Apply temperature scaling to logits
+                scaled_logits = logits / temperature
+                # Softmax over channel dimension (axis=0)
+                exp_logits = np.exp(scaled_logits - np.max(scaled_logits, axis=0, keepdims=True))  # for stability
+                softmax = exp_logits / np.sum(exp_logits, axis=0, keepdims=True)
+                anomaly_result = 1.0 - np.max(softmax, axis=0)
+                print("result shape", anomaly_result.shape)
+
+
+            
+
+            elif args.method == "maxlogit" :
+                logits = result.squeeze(0).data.cpu().numpy()  # shape: (C, H, W)
+                # MaxLogit anomaly score
+                anomaly_result = -np.max(logits, axis=0)  # shape: (H, W)
+
+            elif args.method == "entropy" :
+                logits = result.squeeze(0).data.cpu().numpy()  # shape: (C, H, W)
+                # Softmax (numerically stable)
+                exp_logits = np.exp(logits - np.max(logits, axis=0, keepdims=True))
+                softmax = exp_logits / np.sum(exp_logits, axis=0, keepdims=True)
+                # Compute entropy
+                entropy = -np.sum(softmax * np.log(softmax + 1e-12), axis=0)  # shape: (H, W)
+                anomaly_result = entropy
+
+
         
-        if args.method == "msp" :
-            anomaly_result = 1.0 - np.max(logits, axis=0)
-        elif args.method == "maxlogit" :
-            anomaly_result = -np.max(logits, axis=0)
-        elif args.method == 'entropy':
-            logits = logits - np.max(logits, axis=0, keepdims=True)  # for numerical stability
-            exp_logits = np.exp(logits)
-            softmax = exp_logits / np.sum(exp_logits, axis=0, keepdims=True)
-            log_softmax = np.log(softmax + 1e-12)
-            anomaly_result = -np.sum(softmax * log_softmax, axis=0)
-        else:
-            raise ValueError(f"Unsupported method: {args.method}")
-
+   
         pathGT = path.replace("images", "labels_masks")                
         if "RoadObsticle21" in pathGT:
            pathGT = pathGT.replace("webp", "png")
@@ -200,29 +188,6 @@ def main():
             ood_gts = np.where((ood_gts==14), 255, ood_gts)
             ood_gts = np.where((ood_gts<20), 0, ood_gts)
             ood_gts = np.where((ood_gts==255), 1, ood_gts)
-        
-        pred_seg = np.argmax(logits, axis=0)  # shape (H, W)
-
-        gt_seg_path = path.replace("images", "labels_masks")
-
-        # Fix file extension for different datasets
-        if "RoadObsticle21" in gt_seg_path:
-            gt_seg_path = gt_seg_path.replace("webp", "png")
-        elif "fs_static" in gt_seg_path:
-            gt_seg_path = gt_seg_path.replace("jpg", "png")
-        elif "RoadAnomaly" in gt_seg_path:
-            gt_seg_path = gt_seg_path.replace("jpg", "png")
-
-        if not os.path.isfile(gt_seg_path):
-            print(f"❌ Ground truth segmentation file not found: {gt_seg_path}")
-            continue
-
-        gt_seg = np.array(Image.open(gt_seg_path))  # shape (H, W), values from 0–19
-
-
-        mIoU = compute_iou(pred_seg, gt_seg, num_classes=NUM_CLASSES)
-
-        mIoU_list.append(mIoU)
 
         if 1 not in np.unique(ood_gts):
             continue              
@@ -231,11 +196,6 @@ def main():
              anomaly_score_list.append(anomaly_result)
         del result, anomaly_result, ood_gts, mask
         torch.cuda.empty_cache()
-
-        # After processing all images, calculate the mean mIoU
-    mean_mIoU = np.nanmean(mIoU_list)  # Ignore NaN values while calculating the mean
-    print(f"Mean mIoU for this dataset: {mean_mIoU}")
-
 
     file.write( "\n")
 
@@ -275,8 +235,9 @@ def main():
     print(f'AUPRC score: {prc_auc*100.0}')
     print(f'FPR@TPR95: {fpr*100.0}')
 
-    file.write((args.method+'     ' + dataset +'    AUPRC score:' + str(prc_auc*100.0) + '   FPR@TPR95:' + str(fpr*100.0) ))
+    file.write((dataset + '     ' + args.method + '     ' + str(args.temperature) + '    AUPRC score:' + str(prc_auc*100.0) + '   FPR@TPR95:' + str(fpr*100.0) ))
     file.close()
+
 
 if __name__ == '__main__':
     main()
