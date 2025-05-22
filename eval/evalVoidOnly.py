@@ -38,16 +38,19 @@ def main():
     parser = ArgumentParser()
     parser.add_argument(
     "--input",
-    default="D:/semester_3/AML/project/datasets/FS_LostFound_full/images/*.png",
+    default="D:/semester_3/AML/project/datasets/RoadAnomaly21/images/*.png",
     help="Glob pattern to match images"
 )
     parser.add_argument('--model',default="erfnet")
     # parser.add_argument('--loadDir',default="../trained_models/")
     # parser.add_argument('--loadWeights', default="erfnet_pretrained.pth")
+
     parser.add_argument('--loadDir',default="../save/ENet_Cityscapes/")
     parser.add_argument('--loadWeights', default="ENet")
+
     # parser.add_argument('--loadModel', default="erfnet.py")
     parser.add_argument('--loadModel', default="enet.py")
+
     parser.add_argument('--subset', default="val")  #can be val or train (must have labels)
     parser.add_argument('--datadir', default=r"D:/semester 3/AML/project/datasets/cityscapes")
     parser.add_argument('--num-workers', type=int, default=4)
@@ -85,7 +88,8 @@ def main():
     if args.model == "erfnet" :
         model = ERFNet(NUM_CLASSES)
     elif args.model == "enet" :
-        model = ENet(num_classes=20)
+        model = ENet(NUM_CLASSES)
+    
 
     if (not args.cpu):
         model = torch.nn.DataParallel(model).cuda()
@@ -93,9 +97,12 @@ def main():
     def load_my_state_dict(model, state_dict):  #custom function to load model when not all dict elements
         own_state = model.state_dict()
         for name, param in state_dict.items():
+            
             if name not in own_state:
                 if name.startswith("module."):
                     own_state[name.split("module.")[-1]].copy_(param)
+                elif 'module.'+ name in own_state.keys() :
+                    own_state['module.' + name].copy_(param) 
                 else:
                     print(name, " not loaded")
                     continue
@@ -103,7 +110,14 @@ def main():
                 own_state[name].copy_(param)
         return model
 
-    model = load_my_state_dict(model, torch.load(weightspath, map_location=lambda storage, loc: storage, weights_only=False))
+    state_dict = torch.load(weightspath, map_location=lambda storage, loc: storage, weights_only=False)
+
+    if args.model == "enet" :
+        print(state_dict['epoch'])
+        state_dict = state_dict['state_dict']
+    
+
+    model = load_my_state_dict(model, state_dict)
     print ("Model and weights LOADED successfully")
     model.eval()
 
@@ -140,20 +154,21 @@ def main():
             result = model(images)
 
             logits = result.squeeze(0).data.cpu().numpy()  # shape: (C, H, W)
+            print(logits.shape)
 
 
             # Let's assume class 19 is the Void class
-            void_logits = logits[19]  # shape: (H, W)
+            # void_logits = logits[19]  # shape: (H, W)
 
             # You can use either of the following anomaly scores:
 
             # 1. Using MSP-style softmax for void class only
-            # exp_logits = np.exp(logits - np.max(logits, axis=0, keepdims=True))
-            # softmax = exp_logits / np.sum(exp_logits, axis=0, keepdims=True)
-            # anomaly_result = 1.0 - softmax[19]
+            exp_logits = np.exp(logits - np.max(logits, axis=0, keepdims=True))
+            softmax = exp_logits / np.sum(exp_logits, axis=0, keepdims=True)
+            anomaly_result = 1.0 - softmax[19]
 
             # 2. Simpler: Use just the raw logit value (more common in literature for this)
-            anomaly_result = void_logits  # Higher value = more likely to be Void
+            # anomaly_result = void_logits  # Higher value = more likely to be Void
 
 
             
@@ -227,7 +242,7 @@ def main():
     print(f'AUPRC score: {prc_auc*100.0}')
     print(f'FPR@TPR95: {fpr*100.0}')
 
-    file.write((dataset + '     ' + '    AUPRC score:' + str(prc_auc*100.0) + '   FPR@TPR95:' + str(fpr*100.0) ))
+    file.write((args.model + '     ' + dataset + '     ' + '    AUPRC score:' + str(prc_auc*100.0) + '   FPR@TPR95:' + str(fpr*100.0) ))
     file.close()
 
 

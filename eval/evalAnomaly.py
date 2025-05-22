@@ -1,5 +1,9 @@
 # Copyright (c) OpenMMLab. All rights reserved.
+import sys
 import os
+# Add project root to PYTHONPATH
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 import cv2
 import glob
 import torch
@@ -11,6 +15,11 @@ import os.path as osp
 from argparse import ArgumentParser
 from ood_metrics import fpr_at_95_tpr, calc_metrics, plot_roc, plot_pr,plot_barcode
 from sklearn.metrics import roc_auc_score, roc_curve, auc, precision_recall_curve, average_precision_score
+
+from models.enet import ENet
+from models.bisenetv2 import BiSeNetV2
+import torch.nn.functional as F
+
 
 seed = 42
 
@@ -29,17 +38,19 @@ def main():
     parser = ArgumentParser()
     parser.add_argument(
     "--input",
-    default="D:/semester_3/AML/project/datasets/RoadAnomaly21/images/*.png",
+    default="D:/semester_3/AML/project/datasets/RoadObsticle21/images/*.webp",
     help="Glob pattern to match images"
 )
     parser.add_argument('--method', default='msp', choices=['msp', 'maxlogit', 'entropy'],
                     help="Anomaly scoring method: msp, maxlogit, or entropy")
     
+    parser.add_argument('--model',default="erfnet",choices=['erfnet', 'enet', 'bisenet'])
+    
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for scaling logits (used in MSP)')
- 
-    parser.add_argument('--loadDir',default="../trained_models/")
-    parser.add_argument('--loadWeights', default="erfnet_pretrained.pth")
-    parser.add_argument('--loadModel', default="erfnet.py")
+
+    # parser.add_argument('--loadModel', default="erfnet.py",)
+    # parser.add_argument('--loadModel', default="enet.py")
+
     parser.add_argument('--subset', default="val")  #can be val or train (must have labels)
     parser.add_argument('--datadir', default=r"D:/semester 3/AML/project/datasets/cityscapes")
     parser.add_argument('--num-workers', type=int, default=4)
@@ -68,13 +79,27 @@ def main():
         open('results.txt', 'w').close()
     file = open('results.txt', 'a')
 
-    modelpath = args.loadDir + args.loadModel
-    weightspath = args.loadDir + args.loadWeights
 
-    print ("Loading model: " + modelpath)
+    if args.model == "bisenet" :
+        weightspath = '../save/bisenetv2_finetuned_epoch4.pth'
+    elif args.model == "erfnet" :
+        weightspath = '../trained_models/erfnet_pretrained.pth'
+    elif args.model == "enet" :
+        weightspath = '../save/ENet_Cityscapes/ENet'
+
+
     print ("Loading weights: " + weightspath)
 
-    model = ERFNet(NUM_CLASSES)
+    if args.model == "erfnet" :
+        print("model is erfnet")
+        model = ERFNet(NUM_CLASSES)
+    elif args.model == "enet" :
+        print("model is enet")
+        model = ENet(NUM_CLASSES)
+    elif args.model == "bisenet" :
+        print("model is bisenet")
+        model = BiSeNetV2(NUM_CLASSES)
+
 
     if (not args.cpu):
         model = torch.nn.DataParallel(model).cuda()
@@ -85,15 +110,24 @@ def main():
             if name not in own_state:
                 if name.startswith("module."):
                     own_state[name.split("module.")[-1]].copy_(param)
+                elif 'module.'+ name in own_state.keys() :
+                    own_state['module.' + name].copy_(param) 
                 else:
                     print(name, " not loaded")
                     continue
             else:
                 own_state[name].copy_(param)
         return model
+    
+    state_dict = torch.load(weightspath, map_location=lambda storage, loc: storage, weights_only=False)
 
-    model = load_my_state_dict(model, torch.load(weightspath, map_location=lambda storage, loc: storage))
+    if args.model == "enet" :
+        state_dict = state_dict['state_dict']
+
+    model = load_my_state_dict(model, state_dict)
     print ("Model and weights LOADED successfully")
+
+
     model.eval()
 
     if "*" in args.input or "?" in args.input:  
@@ -127,26 +161,30 @@ def main():
         images = images.permute(0,3,1,2)
         with torch.no_grad():
             result = model(images)
+            
+            if isinstance(result, tuple):
+                result = result[0]
+
             ##### first I tried this #####
             # anomaly_result = 1.0 - np.max(result.squeeze(0).data.cpu().numpy(), axis=0)
             ##### first I tried this #####
-
 
             logits = result.squeeze(0).data.cpu().numpy()
 
 
             if args.method == "msp" :
-
                 temperature = getattr(args, 'temperature', 1.0)
                 # Apply temperature scaling to logits
                 scaled_logits = logits / temperature
                 # Softmax over channel dimension (axis=0)
-                exp_logits = np.exp(scaled_logits - np.max(scaled_logits, axis=0, keepdims=True))  # for stability
-                softmax = exp_logits / np.sum(exp_logits, axis=0, keepdims=True)
-                anomaly_result = 1.0 - np.max(softmax, axis=0)
-                print("result shape", anomaly_result.shape)
-
-
+                # exp_logits = np.exp(scaled_logits - np.max(scaled_logits, axis=0, keepdims=True))  # for stability
+                # softmax = exp_logits / np.sum(exp_logits, axis=0, keepdims=True)
+                # anomaly_result = 1.0 - np.max(softmax, axis=0)
+                softmax_probs = F.softmax(result, dim=1)  # Shape: [B, C, H, W]
+                msp, predicted = torch.max(softmax_probs, dim=1)  # Shape: [B, H, W]
+                anomaly_result = msp
+                anomaly_result = anomaly_result.squeeze(0).data.cpu().numpy()
+                
             
 
             elif args.method == "maxlogit" :
@@ -188,6 +226,7 @@ def main():
             ood_gts = np.where((ood_gts==14), 255, ood_gts)
             ood_gts = np.where((ood_gts<20), 0, ood_gts)
             ood_gts = np.where((ood_gts==255), 1, ood_gts)
+
 
         if 1 not in np.unique(ood_gts):
             continue              

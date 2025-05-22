@@ -2,11 +2,16 @@
 # Nov 2017
 # Eduardo Romera
 #######################
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+import os
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
 
 import numpy as np
 import torch
 import torch.nn.functional as F
-import os
 import importlib
 import time
 
@@ -23,48 +28,108 @@ from erfnet import ERFNet
 from transform import Relabel, ToLabel, Colorize
 from iouEval import iouEval, getColorEntry
 
+from models.enet import ENet
+from models.bisenetv2 import BiSeNetV2
+
+import transforms as ext_transforms
+
+
 NUM_CHANNELS = 3
 NUM_CLASSES = 20
 
 image_transform = ToPILImage()
-input_transform_cityscapes = Compose([
+
+
+enet_input_transform_cityscapes = Compose([
+    Resize((512, 1024), Image.BILINEAR),
+    ToTensor(),              # → [0,1] RGB, no further normalization
+])
+
+
+enet_target_transform_cityscapes = Compose([
+    Resize((512, 1024), Image.NEAREST),
+    ext_transforms.PILToLongTensor(),  # maps void→0, classes→1…19
+])
+
+erfnet_input_transform_cityscapes = Compose([
     Resize(512, Image.BILINEAR),
     ToTensor(),
 ])
-target_transform_cityscapes = Compose([
+erfnet_target_transform_cityscapes = Compose([
     Resize(512, Image.NEAREST),
     ToLabel(),
     Relabel(255, 19),   #ignore label to 19
 ])
 
+bisenet_input_transform_cityscapes = Compose([
+    Resize((512, 1024), Image.BILINEAR),
+    ToTensor(),
+    Normalize(mean=[0.485, 0.456, 0.406],
+              std=[0.229, 0.224, 0.225]),
+])
+
+def pil_to_long_tensor(pic):
+    return torch.from_numpy(np.array(pic)).long()
+
+bisenet_target_transform_cityscapes = Compose([
+    Resize((512, 1024), Image.NEAREST),
+    pil_to_long_tensor,
+])
+
+
 def main(args):
 
-    modelpath = args.loadDir + args.loadModel
-    weightspath = args.loadDir + args.loadWeights
 
-    print ("Loading model: " + modelpath)
+    if args.model == "erfnet" :
+        weightspath = args.loadDir + "erfnet_pretrained.pth"
+    elif args.model == "enet" :
+        weightspath = args.loadDir + "ENet"
+    elif args.model == "bisenet" :
+        weightspath = args.loadDir + "bisenetv2_finetuned_epoch9.pth"
+
     print ("Loading weights: " + weightspath)
 
-    model = ERFNet(NUM_CLASSES)
+    if args.model == "erfnet" :
+        model = ERFNet(NUM_CLASSES)
+    elif args.model == "enet" :
+        model = ENet(NUM_CLASSES)
+    elif args.model == "bisenet" :
+        model = BiSeNetV2(NUM_CLASSES)
 
-    #model = torch.nn.DataParallel(model)
+
     if (not args.cpu):
+        # print("---------------------")
         model = torch.nn.DataParallel(model).cuda()
 
     def load_my_state_dict(model, state_dict):  #custom function to load model when not all dict elements
         own_state = model.state_dict()
+        missing = []
         for name, param in state_dict.items():
             if name not in own_state:
                 if name.startswith("module."):
                     own_state[name.split("module.")[-1]].copy_(param)
-                else:
-                    print(name, " not loaded")
-                    continue
+                elif 'module.'+ name in own_state.keys() :
+                    own_state['module.' + name].copy_(param)
+                
+                elif name not in own_state and f"module.{name}" not in own_state and name.split("module.")[-1] not in own_state:
+                    missing.append(name)
+
             else:
                 own_state[name].copy_(param)
+        print(f"missing keys : {missing}")
         return model
+    
+    state_dict = torch.load(weightspath, map_location=lambda storage, loc: storage, weights_only=False)
 
-    model = load_my_state_dict(model, torch.load(weightspath, map_location=lambda storage, loc: storage))
+    if args.model == "enet" :
+        state_dict = state_dict['state_dict']
+
+    # print(model.state_dict()['transposed_conv.weight'].shape)
+    # print(model.state_dict()['module.transposed_conv.weight'].shape)
+
+
+    model = load_my_state_dict(model, state_dict)
+    # model = load_my_state_dict(model, torch.load(weightspath, map_location=lambda storage, loc: storage))
     print ("Model and weights LOADED successfully")
 
 
@@ -74,10 +139,19 @@ def main(args):
         print ("Error: datadir could not be loaded")
 
 
-    loader = DataLoader(cityscapes(args.datadir, input_transform_cityscapes, target_transform_cityscapes, subset=args.subset), num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+    if args.model == 'enet' : 
+        loader = DataLoader(cityscapes(args.datadir, enet_input_transform_cityscapes, enet_target_transform_cityscapes, subset=args.subset), num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+    elif args.model == 'erfnet' :
+        loader = DataLoader(cityscapes(args.datadir, erfnet_input_transform_cityscapes, erfnet_target_transform_cityscapes, subset=args.subset), num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
+    elif args.model == "bisenet" :
+        loader = DataLoader(cityscapes(args.datadir, bisenet_input_transform_cityscapes, bisenet_target_transform_cityscapes, subset=args.subset), num_workers=args.num_workers, batch_size=args.batch_size, shuffle=False)
 
 
-    iouEvalVal = iouEval(NUM_CLASSES)
+
+
+    # iouEvalVal = iouEval(NUM_CLASSES)
+    iouEvalVal = iouEval(nClasses = NUM_CLASSES )
+
 
     start = time.time()
 
@@ -86,11 +160,40 @@ def main(args):
             images = images.cuda()
             labels = labels.cuda()
 
+        # img = images[0]
+        # print("min/max per channel:", img.view(3, -1).min(1)[0], img.view(3, -1).max(1)[0])
+        # print("mean/std per channel:", img.view(3, -1).mean(1), img.view(3, -1).std(1))
+
+
         inputs = Variable(images)
         with torch.no_grad():
             outputs = model(inputs)
 
-        iouEvalVal.addBatch(outputs.max(1)[1].unsqueeze(1).data, labels)
+            if isinstance(outputs, tuple):
+                outputs = outputs[0]
+
+        preds = outputs.argmax(1).unsqueeze(1)  # shape: (B,1,H,W)
+
+        if args.model == 'enet' :
+            # Prepare labels
+            labels = labels.unsqueeze(1)  # shape: (B,1,H,W)
+
+            # Map labels: 255 (void) → 19 (ignore index), 1–19 → 0–18
+            labels[labels == 255] = 0
+
+            # Same remap for preds if model trained on 1–19
+            preds = preds - 1
+            preds[preds == -1] = 19  # match label remapping
+
+        if args.model == 'bisenet' :
+            labels = labels.unsqueeze(1)
+            labels[labels == 255] = 19
+            print("preds shape ",preds.shape)
+            print("labels shape ",labels.shape)
+
+        # Feed to IoU computation
+        iouEvalVal.addBatch(preds, labels)
+
 
         filenameSave = filename[0].split("leftImg8bit/")[1] 
 
@@ -137,11 +240,13 @@ if __name__ == '__main__':
 
     parser.add_argument('--state')
 
+    parser.add_argument('--model',default="erfnet")
+
     parser.add_argument('--loadDir',default="../trained_models/")
-    parser.add_argument('--loadWeights', default="erfnet_pretrained.pth")
+    # parser.add_argument('--loadWeights', default="erfnet_pretrained.pth")
     parser.add_argument('--loadModel', default="erfnet.py")
     parser.add_argument('--subset', default="val")  #can be val or train (must have labels)
-    parser.add_argument('--datadir', default="/home/shyam/ViT-Adapter/segmentation/data/cityscapes/")
+    parser.add_argument('--datadir', default=r"D:\semester_3\AML\project\datasets\cityscapes")
     parser.add_argument('--num-workers', type=int, default=4)
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
