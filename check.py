@@ -6,8 +6,11 @@ from torchvision.transforms import Compose, Resize, ToTensor, Normalize
 import numpy as np
 from models.enet import ENet
 from models.bisenetv2 import BiSeNetV2
-import transforms as ext_transforms
 from argparse import ArgumentParser
+from eval.transform import Relabel, ToLabel, Colorize
+from eval.erfnet import ERFNet
+
+
 
 # Cityscapes 20-class color map and names
 CITYSCAPES_CLASSES = [
@@ -48,10 +51,10 @@ def get_cityscapes_legend_patches():
     return [Patch(color=np.array(color)/255.0, label=label) for label, color in CITYSCAPES_CLASSES]
 
 def main(args):
-    enet_weightspath = "./trained_models/ENet" 
-    # bisenet_weightspath = "./trained_models/model_final_v2_city.pth" 
 
-    bisenet_weightspath = "./trained_models/checkpoint15.pth" 
+    enet_weightspath = "./trained_models/ENet" 
+    bisenet_weightspath = "./trained_models/checkpoint20.pth" 
+    erfnet_weightspath = "./trained_models/erfnet_pretrained.pth" 
 
     N_CLASSES = 20
 
@@ -59,7 +62,10 @@ def main(args):
         model = ENet(num_classes=N_CLASSES)
         model = torch.nn.DataParallel(model).cuda()
     elif args.model == 'bisenet':
-        model = BiSeNetV2(n_classes=N_CLASSES)
+        model = BiSeNetV2(n_classes=N_CLASSES )
+        model = torch.nn.DataParallel(model).cuda()
+    elif args.model == 'erfnet':
+        model = ERFNet(N_CLASSES )
         model = torch.nn.DataParallel(model).cuda()
 
     def load_my_state_dict(model, state_dict):
@@ -77,15 +83,26 @@ def main(args):
                 own_state[name].copy_(param)
         print(f"missing keys : {missing}")
         return model
+    
 
     if args.model == "enet":
-        state_dict = torch.load(enet_weightspath, map_location=lambda storage, loc: storage, weights_only=False)
-        state_dict = state_dict['state_dict']
+        checkpoint = torch.load(enet_weightspath, map_location=lambda storage, loc: storage, weights_only=False)
+        state_dict = checkpoint['state_dict']
     if args.model == "bisenet":
-        state_dict = torch.load(bisenet_weightspath, map_location=lambda storage, loc: storage, weights_only=False)
-
-    model = load_my_state_dict(model, state_dict['model_state_dict'])
+        checkpoint = torch.load(bisenet_weightspath, map_location=lambda storage, loc: storage, weights_only=False)
+        state_dict = checkpoint['model_state_dict']
+    if args.model == "erfnet":
+        checkpoint = torch.load(erfnet_weightspath, map_location=lambda storage, loc: storage, weights_only=False)
+        state_dict = checkpoint
+    
+    
+    model = load_my_state_dict(model, state_dict)
     model = model.eval().cuda()
+
+    # ENet transformations
+
+    def pil_to_long_tensor(pic):
+        return torch.from_numpy(np.array(pic)).long()
 
     enet_img_transform = Compose([
         Resize((512, 1024), Image.BILINEAR),
@@ -94,28 +111,69 @@ def main(args):
 
     enet_lbl_transform = Compose([
         Resize((512, 1024), Image.NEAREST),
-        ext_transforms.PILToLongTensor(),
+        pil_to_long_tensor
     ])
+
+    # BiseNet transformations
+    
+    mapping_20 = { 
+        0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0,
+        7: 1, 8: 2,
+        9: 0, 10: 0,
+        11: 3, 12: 4, 13: 5,
+        14: 0, 15: 0, 16: 0,
+        17: 6, 18: 0, 19: 7, 20: 8, 21: 9,
+        22: 10, 23: 11, 24: 12, 25: 13, 26: 14,
+        27: 15, 28: 16,
+        29: 0, 30: 0,
+        31: 17, 32: 18, 33: 19,
+        255:0
+    }
+
+    # Create fast lookup table (for performance)
+    mapping_array = np.zeros(256, dtype=np.uint8)
+    for k, v in mapping_20.items():
+        mapping_array[k] = v
+
+    # Transformation function for the label
+    def pil_to_mapped_tensor(pic):
+        label = np.array(pic)  # Convert PIL to numpy
+        # label[label == -1] = 255
+        label = mapping_array[label]  # Apply mapping
+        return torch.from_numpy(label).long()
+
 
     bisenet_img_transform = Compose([
         Resize((512, 1024), Image.BILINEAR),
         ToTensor(),
         Normalize(mean=[0.485, 0.456, 0.406],
-                  std=[0.229, 0.224, 0.225]),
+                    std=[0.229, 0.224, 0.225]),
     ])
 
-    def pil_to_long_tensor(pic):
-        return torch.from_numpy(np.array(pic)).long()
 
     bisenet_lbl_transform = Compose([
         Resize((512, 1024), Image.NEAREST),
-        pil_to_long_tensor,
+        pil_to_mapped_tensor,
     ])
+
+    erfnet_img_transform = Compose([
+        Resize(512, Image.BILINEAR),
+        ToTensor(),
+    ])
+    erfnet_lbl_transform = Compose([
+        Resize(512, Image.NEAREST),
+        ToLabel(),
+        Relabel(255, 19),   #ignore label to 19
+    ])
+
 
     img_path  = "../datasets/Cityscapes/leftImg8bit/val/frankfurt/frankfurt_000000_003357_leftImg8bit.png"
     gt_path   = "../datasets/Cityscapes/gtFine/val/frankfurt/frankfurt_000000_003357_gtFine_labelIds.png"
     # img_path  = "../datasets/Cityscapes/leftImg8bit/val/frankfurt/frankfurt_000000_001236_leftImg8bit.png"
     # gt_path   = "../datasets/Cityscapes/gtFine/val/frankfurt/frankfurt_000000_001236_gtFine_labelIds.png"
+    # img_path = r"D:\semester_3\AML\project\datasets\RoadAnomaly21\images\1.png" 
+    # gt_path = r"D:\semester_3\AML\project\datasets\RoadAnomaly21\labels_masks\1.png" 
+    
     img       = Image.open(img_path)
     gt_label  = Image.open(gt_path)
 
@@ -125,6 +183,9 @@ def main(args):
     elif args.model == 'bisenet':
         x = bisenet_img_transform(img).unsqueeze(0).cuda()
         y = bisenet_lbl_transform(gt_label).unsqueeze(0).cuda()
+    elif args.model == 'erfnet':
+        x = enet_img_transform(img).unsqueeze(0).cuda()
+        y = enet_lbl_transform(gt_label).unsqueeze(0).cuda()
 
     with torch.no_grad():
         logits = model(x)
@@ -132,11 +193,12 @@ def main(args):
             logits = logits[0]
         pred = logits.argmax(1).squeeze(0).cpu().numpy()
 
-    
+        print("logits shape ", logits.shape)
+
 
     # Convert prediction to RGB image
 
-    if args.model == "bisenet" :
+    if args.model == "erfnet" :
         pred = pred + 1
 
     print("Input shape: ", x.shape)

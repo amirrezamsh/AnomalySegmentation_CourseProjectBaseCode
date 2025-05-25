@@ -18,6 +18,57 @@ from sklearn.metrics import roc_auc_score, roc_curve, auc, precision_recall_curv
 from models.enet import ENet
 from models.bisenetv2 import BiSeNetV2
 import torch.nn.functional as F
+from train.main import MyCoTransform
+from torchvision import transforms
+import matplotlib.pyplot as plt
+from torchvision.transforms import functional as TF
+
+
+
+def visualize_anomaly_detection(input_image, mahalanobis_map, gt_mask, title=None):
+    """
+    input_image: PIL Image or tensor [3, H, W]
+    mahalanobis_map: tensor [H, W] — normalized [0, 1]
+    gt_mask: numpy array or tensor [H, W] — 1 for OOD, 0 for in-dist
+    """
+    # Convert input image to displayable format if it's a tensor
+    if isinstance(input_image, torch.Tensor):
+        if input_image.dim() == 3:
+            input_image = TF.to_pil_image(input_image.cpu())
+        else:
+            raise ValueError("Expected 3D tensor for input image")
+
+    # Convert tensors to numpy arrays
+    if isinstance(mahalanobis_map, torch.Tensor):
+        mahalanobis_map = mahalanobis_map.detach().cpu().numpy()
+    if isinstance(gt_mask, torch.Tensor):
+        gt_mask = gt_mask.detach().cpu().numpy()
+
+    # Create figure
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(1, 3, 1)
+    plt.imshow(input_image)
+    plt.title("Input Image")
+    plt.axis("off")
+
+    plt.subplot(1, 3, 2)
+    plt.imshow(mahalanobis_map, cmap='viridis')
+    plt.colorbar()
+    plt.title("Mahalanobis Map")
+
+    plt.subplot(1, 3, 3)
+    plt.imshow(gt_mask, cmap='gray')
+    plt.title("GT OOD Mask")
+    plt.axis("off")
+
+    if title:
+        plt.suptitle(title, fontsize=16)
+
+    plt.tight_layout()
+    plt.show()
+
+
 
 
 seed = 42
@@ -37,15 +88,15 @@ def main():
     parser = ArgumentParser()
     parser.add_argument(
     "--input",
-    default="D:/semester_3/AML/project/datasets/RoadAnomaly21/images/*.png",
+    default="D:/semester_3/AML/project/datasets/RoadObsticle21/images/*.webp",
     help="Glob pattern to match images"
 )
-    parser.add_argument('--method', default='msp', choices=['msp', 'maxlogit', 'entropy'],
-                    help="Anomaly scoring method: msp, maxlogit, or entropy")
+    # parser.add_argument('--method', default='msp', choices=['msp', 'maxlogit', 'entropy'],
+    #                 help="Anomaly scoring method: msp, maxlogit, or entropy")
     
     parser.add_argument('--model',default="erfnet",choices=['erfnet', 'enet', 'bisenet'])
     
-    parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for scaling logits (used in MSP)')
+    # parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for scaling logits (used in MSP)')
 
 
     parser.add_argument('--subset', default="val")  #can be val or train (must have labels)
@@ -157,72 +208,102 @@ def main():
         print("❌ No images found! Please check the --input path.")
         exit(1)
         # for path in glob.glob(os.path.expanduser(str(args.input[0]))):
+
+    mean_vector = torch.load('../mean_vector.pt').to('cuda')      # shape: [128]
+    cov = torch.load('../covariance_matrix.pt')
+    # Regularization (apply again to be safe)
+    reg_lambda = 1e-6
+    identity = torch.eye(cov.shape[0], device=cov.device)
+    cov += reg_lambda * identity
+    # Compute inverse
+    inv_cov = torch.inverse(cov)
+
+    
+    co_transform = MyCoTransform(enc=True, augment=False, height=512)
+    resize_transform = transforms.Resize((512, 1024))
+
+    
+
     for path in args.input :
         print(path)
-        images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
-        images = images.permute(0,3,1,2)
-        print("images shape ",images.shape)
+        # images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
+        # images = images.permute(0,3,1,2)
+        # print("images shape ",images.shape)
+        img = Image.open(path).convert("RGB")
+        img = resize_transform(img)
+        img_tensor, _ = co_transform(img, img)  # GT ignored
+        img_tensor = img_tensor.unsqueeze(0).to('cuda')
+
+        # print("img_tensor shape ",img_tensor.shape) #([1, 3, 720, 1280])
+
         with torch.no_grad():
-            result = model(images)
-            
-            if isinstance(result, tuple):
-                result = result[0]
+            features = model(img_tensor, only_encode=True)
 
-            ##### first I tried this #####
-            # anomaly_result = 1.0 - np.max(result.squeeze(0).data.cpu().numpy(), axis=0)
-            ##### first I tried this #####
-
-            logits = result.squeeze(0).data.cpu().numpy()
-
-
-            if args.method == "msp" :
-                temperature = getattr(args, 'temperature', 1.0)
-                # Apply temperature scaling to logits
-                scaled_logits = logits / temperature
-                # Softmax over channel dimension (axis=0)
-                # exp_logits = np.exp(scaled_logits - np.max(scaled_logits, axis=0, keepdims=True))  # for stability
-                # softmax = exp_logits / np.sum(exp_logits, axis=0, keepdims=True)
-                # anomaly_result = 1.0 - np.max(softmax, axis=0)
-
-
-                softmax_probs = F.softmax(result / temperature, dim=1)  # Shape: [B, C, H, W]
-                msp, predicted = torch.max(softmax_probs, dim=1)  # Shape: [B, H, W]
-                anomaly_result = msp
-                anomaly_result = anomaly_result.squeeze(0).data.cpu().numpy()
-                
-                print("anomaly result shape ",anomaly_result.shape)
+        # print("features shape1 ",features.shape) #([1, 128, 90, 160])
             
 
-            elif args.method == "maxlogit" :
-                # MaxLogit anomaly score
-                anomaly_result = -np.max(logits, axis=0)  # shape: (H, W)
+        B, C, H, W = features.shape
+        features = features.permute(0, 2, 3, 1).reshape(-1, C)  # [H*W, 128]
+        # features = features.squeeze(0)  # [128, H, W]
+        # features = features.permute(1, 2, 0).reshape(-1, 128)  # [H*W, 128]
 
-            elif args.method == "entropy" :
-                # logits = result.squeeze(0).data.cpu().numpy()  # shape: (C, H, W)
-                # # Softmax (numerically stable)
-                # exp_logits = np.exp(logits - np.max(logits, axis=0, keepdims=True))
-                # softmax = exp_logits / np.sum(exp_logits, axis=0, keepdims=True)
-                # # Compute entropy
-                # entropy = -np.sum(softmax * np.log(softmax + 1e-12), axis=0)  # shape: (H, W)
-                # anomaly_result = entropy
+        # print("features shape ",features.shape) #([14400, 128])
 
 
-                # `result` is your logits tensor of shape [1, 20, 720, 1280]
-                # 1) Convert logits to probabilities and log-probabilities along the class axis
-                probs     = F.softmax(result,    dim=1)  # → [1, 20, 720, 1280]
-                log_probs = F.log_softmax(result, dim=1)  # → [1, 20, 720, 1280]
-
-                # 2) Compute entropy at each pixel: H = −∑ p⋅log p over classes
-                entropy_map = -torch.sum(probs * log_probs, dim=1)  # → [1, 720, 1280]
-
-                # 3) (Optional) Normalize by log(C) if you want values in [0,1]:
-                C = result.size(1)  # =20
-                entropy_map = entropy_map / torch.log(torch.tensor(C, dtype=entropy_map.dtype))
-
-                # 4) Squeeze batch dim and convert to NumPy if needed
-                anomaly_result = entropy_map.squeeze(0).cpu().numpy()  # → [720, 1280]
+        # features = (features - features.mean(dim=1, keepdim=True)) / (features.std(dim=1, keepdim=True) + 1e-6) #wrong
 
 
+        print("Feature mean:", features.mean().item())
+        print("Feature std:", features.std().item())
+        print("Feature max:", features.max().item())
+        print("Feature min:", features.min().item())
+
+
+        # Subtract mean
+        delta = features - mean_vector
+
+        # Mahalanobis distance: sqrt((x - μ)^T Σ⁻¹ (x - μ))
+        # Equivalent to: sqrt(sum((delta @ inv_cov) * delta, dim=1))
+        inv_cov = inv_cov.to(delta.device)
+
+        # print("Delta contains NaN:", torch.isnan(delta).any().item())
+        # print("inv_cov contains NaN:", torch.isnan(inv_cov).any().item())
+        # print("Delta contains Inf:", torch.isinf(delta).any().item())
+        # print("inv_cov contains Inf:", torch.isinf(inv_cov).any().item())
+
+
+        # mahalanobis = torch.sqrt((delta @ inv_cov) * delta).sum(dim=1)  # [H*W] #this gives nan in result
+        mahalanobis = torch.sqrt(torch.einsum('bi,ij,bj->b', delta, inv_cov, delta))
+
+        # mahalanobis = (mahalanobis - mahalanobis.min()) / (mahalanobis.max() - mahalanobis.min()) #comment this out, I get better results without this 
+
+        # print("Min Mahalanobis distance:", mahalanobis.min().item())
+        # print("Max Mahalanobis distance:", mahalanobis.max().item())
+
+        # Reshape back to image size
+        mahalanobis_map = mahalanobis.view(H, W)  # [64, 128]
+
+        # Optional: Upsample to original image size
+        mahalanobis_map = mahalanobis_map.unsqueeze(0).unsqueeze(0)  # [1, 1, 64, 128]
+        mahalanobis_map_up = F.interpolate(mahalanobis_map, size=(512, 1024), mode='bilinear', align_corners=False)
+        mahalanobis_map_up = mahalanobis_map_up.squeeze().cpu().numpy()  # [512, 1024] 
+
+        #min-max normalization suggestion to improve AUPRC
+        # mahalanobis_map_up = (mahalanobis_map_up - mahalanobis_map_up.min()) / (mahalanobis_map_up.max() - mahalanobis_map_up.min() + 1e-8)
+
+
+        #z-score normalization suggestion to improve AUPRC
+        # mean = mahalanobis_map_up.mean()
+        # std = mahalanobis_map_up.std()
+        # mahalanobis_map_up = (mahalanobis_map_up - mean) / (std + 1e-8)
+
+
+        # Gaussian smoothing
+        mahalanobis_map_up = cv2.GaussianBlur(mahalanobis_map_up, ksize=(3, 3), sigmaX=1.5)
+
+
+        print("mahalanobismapup shape ",mahalanobis_map_up.shape)
+        
         
    
         pathGT = path.replace("images", "labels_masks")                
@@ -234,7 +315,10 @@ def main():
            pathGT = pathGT.replace("jpg", "png")  
 
         mask = Image.open(pathGT)
-        ood_gts = np.array(mask)
+        mask_resized = mask.resize((1024,512), resample=Image.NEAREST)
+        ood_gts = np.array(mask_resized)
+
+        print("oodgts shape ",ood_gts.shape)
 
         if "RoadAnomaly" in pathGT:
             ood_gts = np.where((ood_gts==2), 1, ood_gts)
@@ -248,6 +332,8 @@ def main():
             ood_gts = np.where((ood_gts<20), 0, ood_gts)
             ood_gts = np.where((ood_gts==255), 1, ood_gts)
 
+        # visualize_anomaly_detection(img,mahalanobis_map_up,ood_gts)
+
         
 
 
@@ -255,8 +341,8 @@ def main():
             continue              
         else:
              ood_gts_list.append(ood_gts)
-             anomaly_score_list.append(anomaly_result)
-        del result, anomaly_result, ood_gts, mask
+             anomaly_score_list.append(mahalanobis_map_up)
+        del features, mahalanobis_map_up, ood_gts, mask
         torch.cuda.empty_cache()
 
     file.write( "\n")
@@ -299,7 +385,7 @@ def main():
     print(f'AUPRC score: {prc_auc*100.0}')
     print(f'FPR@TPR95: {fpr*100.0}')
 
-    file.write((dataset + '     ' + args.method + '     ' + str(args.temperature) + '    AUPRC score:' + str(prc_auc*100.0) + '   FPR@TPR95:' + str(fpr*100.0) ))
+    # file.write((dataset + '     ' + args.method + '     ' + str(args.temperature) + '    AUPRC score:' + str(prc_auc*100.0) + '   FPR@TPR95:' + str(fpr*100.0) ))
     file.close()
 
 

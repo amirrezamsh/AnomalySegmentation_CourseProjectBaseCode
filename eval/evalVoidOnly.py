@@ -15,7 +15,7 @@ from PIL import Image
 import numpy as np
 from erfnet import ERFNet
 from models.enet import ENet
-
+from models.bisenetv2 import BiSeNetV2
 import os.path as osp
 from argparse import ArgumentParser
 from ood_metrics import fpr_at_95_tpr, calc_metrics, plot_roc, plot_pr,plot_barcode
@@ -38,7 +38,7 @@ def main():
     parser = ArgumentParser()
     parser.add_argument(
     "--input",
-    default="D:/semester_3/AML/project/datasets/RoadAnomaly21/images/*.png",
+    default="D:/semester_3/AML/project/datasets/RoadAnomaly/images/*.jpg",
     help="Glob pattern to match images"
 )
     parser.add_argument('--model',default="erfnet")
@@ -46,11 +46,6 @@ def main():
     # parser.add_argument('--loadWeights', default="erfnet_pretrained.pth")
 
     parser.add_argument('--loadDir',default="../save/ENet_Cityscapes/")
-    parser.add_argument('--loadWeights', default="ENet")
-
-    # parser.add_argument('--loadModel', default="erfnet.py")
-    parser.add_argument('--loadModel', default="enet.py")
-
     parser.add_argument('--subset', default="val")  #can be val or train (must have labels)
     parser.add_argument('--datadir', default=r"D:/semester 3/AML/project/datasets/cityscapes")
     parser.add_argument('--num-workers', type=int, default=4)
@@ -79,42 +74,59 @@ def main():
         open('results.txt', 'w').close()
     file = open('results.txt', 'a')
 
-    modelpath = args.loadDir + args.loadModel
-    weightspath = args.loadDir + args.loadWeights
+    loadModel = ''
 
-    print ("Loading model: " + modelpath)
+    if args.model == "erfnet" :
+        weightspath = '../trained_models/erfnet_pretrained.pth'
+        loadModel = 'ErfNet'
+    elif args.model == "enet" :
+        weightspath = '../trained_models/ENet'
+        loadModel = 'ENet'
+    elif args.model == 'bisenet' :
+        weightspath = '../trained_models/checkpoint20.pth'
+        loadModel = 'BiseNet'
+
+
+    print ("Loading model: " + loadModel)
     print ("Loading weights: " + weightspath)
 
     if args.model == "erfnet" :
         model = ERFNet(NUM_CLASSES)
     elif args.model == "enet" :
         model = ENet(NUM_CLASSES)
+    elif args.model == 'bisenet' :
+        model = BiSeNetV2(NUM_CLASSES)
+
     
 
     if (not args.cpu):
         model = torch.nn.DataParallel(model).cuda()
 
-    def load_my_state_dict(model, state_dict):  #custom function to load model when not all dict elements
+    def load_my_state_dict(model, state_dict):
         own_state = model.state_dict()
+        missing = []
         for name, param in state_dict.items():
-            
             if name not in own_state:
                 if name.startswith("module."):
                     own_state[name.split("module.")[-1]].copy_(param)
-                elif 'module.'+ name in own_state.keys() :
-                    own_state['module.' + name].copy_(param) 
-                else:
-                    print(name, " not loaded")
-                    continue
+                elif 'module.'+ name in own_state.keys():
+                    own_state['module.' + name].copy_(param)
+                elif name not in own_state and f"module.{name}" not in own_state and name.split("module.")[-1] not in own_state:
+                    missing.append(name)
             else:
                 own_state[name].copy_(param)
+        print(f"missing keys : {missing}")
         return model
 
-    state_dict = torch.load(weightspath, map_location=lambda storage, loc: storage, weights_only=False)
+    checkpoint = torch.load(weightspath, map_location=lambda storage, loc: storage, weights_only=False)
 
     if args.model == "enet" :
-        print(state_dict['epoch'])
-        state_dict = state_dict['state_dict']
+        state_dict = checkpoint['state_dict']
+    elif args.model == 'bisenet' :
+        state_dict = checkpoint['model_state_dict']
+    elif args.model == 'erfnet' :
+        state_dict = checkpoint
+
     
 
     model = load_my_state_dict(model, state_dict)
@@ -153,8 +165,11 @@ def main():
         with torch.no_grad():
             result = model(images)
 
+            if isinstance(result, tuple):
+                result = result[0]
+
             logits = result.squeeze(0).data.cpu().numpy()  # shape: (C, H, W)
-            print(logits.shape)
+            
 
 
             # Let's assume class 19 is the Void class
@@ -165,7 +180,10 @@ def main():
             # 1. Using MSP-style softmax for void class only
             exp_logits = np.exp(logits - np.max(logits, axis=0, keepdims=True))
             softmax = exp_logits / np.sum(exp_logits, axis=0, keepdims=True)
-            anomaly_result = 1.0 - softmax[19]
+            if args.model =='bisenet' or args.model == 'enet' :
+                anomaly_result = 1.0 - softmax[0]
+            elif args.model == 'erfnet' :
+                anomaly_result = 1.0 - softmax[19]
 
             # 2. Simpler: Use just the raw logit value (more common in literature for this)
             # anomaly_result = void_logits  # Higher value = more likely to be Void
@@ -242,7 +260,7 @@ def main():
     print(f'AUPRC score: {prc_auc*100.0}')
     print(f'FPR@TPR95: {fpr*100.0}')
 
-    file.write((args.model + '     ' + dataset + '     ' + '    AUPRC score:' + str(prc_auc*100.0) + '   FPR@TPR95:' + str(fpr*100.0) ))
+    # file.write((args.model + '     ' + dataset + '     ' + '    AUPRC score:' + str(prc_auc*100.0) + '   FPR@TPR95:' + str(fpr*100.0) ))
     file.close()
 
 

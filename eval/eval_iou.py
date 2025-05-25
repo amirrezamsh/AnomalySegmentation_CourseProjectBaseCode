@@ -61,6 +61,52 @@ erfnet_target_transform_cityscapes = Compose([
     Relabel(255, 19),   #ignore label to 19
 ])
 
+# -------------
+
+# mapping_20 = { 
+#     0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0,
+#     7: 1, 8: 2,
+#     9: 0, 10: 0,
+#     11: 3, 12: 4, 13: 5,
+#     14: 0, 15: 0, 16: 0,
+#     17: 6, 18: 0, 19: 7, 20: 8, 21: 9,
+#     22: 10, 23: 11, 24: 12, 25: 13, 26: 14,
+#     27: 15, 28: 16,
+#     29: 0, 30: 0,
+#     31: 17, 32: 18, 33: 19,
+#     # -1: 0
+#     255:19
+# }
+
+# # Create fast lookup table (for performance)
+# mapping_array = np.full(256,19, dtype=np.uint8)
+# for k, v in mapping_20.items():
+#     mapping_array[k] = v
+
+# # Transformation function for the label
+# def pil_to_mapped_tensor(pic):
+#     label = np.array(pic)  # Convert PIL to numpy
+#     # label[label == -1] = 255
+#     label = mapping_array[label]  # Apply mapping
+#     return torch.from_numpy(label).long()
+
+
+# bisenet_input_transform_cityscapes = Compose([
+#     Resize((512, 1024), Image.BILINEAR),
+#     ToTensor(),
+#     Normalize(mean=[0.485, 0.456, 0.406],
+#                 std=[0.229, 0.224, 0.225]),
+# ])
+
+
+# bisenet_target_transform_cityscapes = Compose([
+#     Resize((512, 1024), Image.NEAREST),
+#     pil_to_mapped_tensor,
+# ])
+
+
+# -----------
+
 bisenet_input_transform_cityscapes = Compose([
     Resize((512, 1024), Image.BILINEAR),
     ToTensor(),
@@ -85,7 +131,7 @@ def main(args):
     elif args.model == "enet" :
         weightspath = args.loadDir + "ENet"
     elif args.model == "bisenet" :
-        weightspath = args.loadDir + "bisenetv2_finetuned_epoch9.pth"
+        weightspath = args.loadDir + "checkpoint20.pth"
 
     print ("Loading weights: " + weightspath)
 
@@ -119,17 +165,18 @@ def main(args):
         print(f"missing keys : {missing}")
         return model
     
-    state_dict = torch.load(weightspath, map_location=lambda storage, loc: storage, weights_only=False)
+    checkpoint = torch.load(weightspath, map_location=lambda storage, loc: storage, weights_only=False)
 
     if args.model == "enet" :
-        state_dict = state_dict['state_dict']
+        state_dict = checkpoint['state_dict']
 
-    # print(model.state_dict()['transposed_conv.weight'].shape)
-    # print(model.state_dict()['module.transposed_conv.weight'].shape)
+    elif args.model == 'bisenet' :
+        model = load_my_state_dict(model, checkpoint['model_state_dict'])
+
+    elif args.model == 'erfnet' :
+        model = load_my_state_dict(model, checkpoint)
 
 
-    model = load_my_state_dict(model, state_dict)
-    # model = load_my_state_dict(model, torch.load(weightspath, map_location=lambda storage, loc: storage))
     print ("Model and weights LOADED successfully")
 
 
@@ -164,6 +211,10 @@ def main(args):
         # print("min/max per channel:", img.view(3, -1).min(1)[0], img.view(3, -1).max(1)[0])
         # print("mean/std per channel:", img.view(3, -1).mean(1), img.view(3, -1).std(1))
 
+        print("filename : ",filename)
+        # print("images shape: ",images.shape)
+        # print("labels shape: ",labels.shape)
+
 
         inputs = Variable(images)
         with torch.no_grad():
@@ -188,8 +239,14 @@ def main(args):
         if args.model == 'bisenet' :
             labels = labels.unsqueeze(1)
             labels[labels == 255] = 19
-            print("preds shape ",preds.shape)
-            print("labels shape ",labels.shape)
+            
+            preds = preds - 1
+            preds[preds == -1] = 19  # match label remapping
+
+            
+            # labels[labels == 255] = 19
+            # print("preds shape ",preds.shape)
+            # print("labels shape ",labels.shape)
 
         # Feed to IoU computation
         iouEvalVal.addBatch(preds, labels)
