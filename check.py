@@ -52,7 +52,8 @@ def get_cityscapes_legend_patches():
 
 def main(args):
 
-    enet_weightspath = "./trained_models/ENet" 
+    # enet_weightspath = "./trained_models/ENet" 
+    enet_weightspath = "./trained_models/enet252.pth" 
     bisenet_weightspath = "./trained_models/checkpoint20.pth" 
     erfnet_weightspath = "./trained_models/erfnet_pretrained.pth" 
 

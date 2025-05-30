@@ -55,4 +55,4 @@ feature_bank = torch.cat(all_features, dim=0)  # [num_images * N, C]
 print("Final feature bank shape:", feature_bank.shape)
 
 # Optionally save
-torch.save(feature_bank, "feature_bank.pt")
+torch.save(feature_bank, "features_erfnet_encoder_random.pt")
