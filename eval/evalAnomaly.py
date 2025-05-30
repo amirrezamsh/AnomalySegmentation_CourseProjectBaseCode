@@ -14,10 +14,22 @@ import os.path as osp
 from argparse import ArgumentParser
 from ood_metrics import fpr_at_95_tpr, calc_metrics, plot_roc, plot_pr,plot_barcode
 from sklearn.metrics import roc_auc_score, roc_curve, auc, precision_recall_curve, average_precision_score
+from torchvision.transforms import Compose, ToTensor, Resize
 
 from models.enet import ENet
 from models.bisenetv2 import BiSeNetV2
 import torch.nn.functional as F
+
+
+input_transform = Compose([
+    Resize((512, 1024), interpolation=Image.BILINEAR),
+    ToTensor()
+])
+
+target_transform = Compose([
+    Resize((512, 1024), interpolation=Image.NEAREST)
+])
+
 
 
 seed = 42
@@ -37,7 +49,7 @@ def main():
     parser = ArgumentParser()
     parser.add_argument(
     "--input",
-    default="D:/semester_3/AML/project/datasets/RoadAnomaly21/images/*.png",
+    default="D:/semester_3/AML/project/datasets/RoadObsticle21/images/*.webp",
     help="Glob pattern to match images"
 )
     parser.add_argument('--method', default='msp', choices=['msp', 'maxlogit', 'entropy'],
@@ -78,7 +90,7 @@ def main():
 
 
     if args.model == "bisenet" :
-        weightspath = '../trained_models/checkpoint20.pth'
+        weightspath = '../trained_models/Checkpoint20_20.pth'
     elif args.model == "erfnet" :
         weightspath = '../trained_models/erfnet_pretrained.pth'
     elif args.model == "enet" :
@@ -161,6 +173,8 @@ def main():
         print(path)
         images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
         images = images.permute(0,3,1,2)
+
+
         print("images shape ",images.shape)
         with torch.no_grad():
             result = model(images)
@@ -234,6 +248,7 @@ def main():
            pathGT = pathGT.replace("jpg", "png")  
 
         mask = Image.open(pathGT)
+
         ood_gts = np.array(mask)
 
         if "RoadAnomaly" in pathGT:

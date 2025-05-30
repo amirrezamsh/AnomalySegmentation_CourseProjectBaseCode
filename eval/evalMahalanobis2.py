@@ -16,7 +16,7 @@ import os.path as osp
 from argparse import ArgumentParser
 from ood_metrics import fpr_at_95_tpr, calc_metrics, plot_roc, plot_pr,plot_barcode
 from sklearn.metrics import roc_auc_score, roc_curve, auc, precision_recall_curve, average_precision_score
-from torchvision.transforms import Compose, ToTensor, Resize
+
 from models.enet import ENet
 from models.bisenetv2 import BiSeNetV2
 import torch.nn.functional as F
@@ -26,6 +26,8 @@ import matplotlib.pyplot as plt
 from torchvision.transforms import functional as TF
 import cv2
 from sklearn.decomposition import PCA
+from torchvision.transforms import Compose, ToTensor, Resize
+
 
 
 import torch
@@ -45,7 +47,21 @@ target_transform = Compose([
 ])
 
 
-def mahalanobis_score(features, mean, cov, pca_model=None):
+def mahalanobis_score(features, mean, cov, *, reg=1e-5, pca_model=None):
+    """
+    Computes Mahalanobis distance for a batch of features.
+    Supports optional PCA transform and device-safe computation.
+
+    Args:
+        features (Tensor or ndarray): shape [N, D] (PyTorch or NumPy)
+        mean (ndarray): mean vector of shape [D]
+        cov (ndarray): covariance matrix of shape [D, D]
+        reg (float): regularization strength for numerical stability
+        pca_model (sklearn PCA object, optional): if given, applies PCA.transform() on features
+
+    Returns:
+        scores (Tensor): Mahalanobis distance scores of shape [N]
+    """
 
     # Apply PCA if provided
     if pca_model is not None:
@@ -65,11 +81,13 @@ def mahalanobis_score(features, mean, cov, pca_model=None):
     device = mean.device
     features = features.to(device)
 
-    inv_cov = torch.inverse(cov)
+    # Regularize and invert covariance
+    cov += reg * torch.eye(cov.shape[0], device=device)
+    precision = torch.inverse(cov)
 
     # Compute Mahalanobis score
     delta = features - mean
-    scores = torch.einsum('nd,dd,nd->n', delta, inv_cov, delta)
+    scores = torch.einsum('nd,dd,nd->n', delta, precision, delta)
     return scores
 
 
@@ -138,7 +156,8 @@ def main():
 
     parser.add_argument('--model',default="erfnet",choices=['erfnet', 'enet', 'bisenet'])
     parser.add_argument('--stats')
-    parser.add_argument('--pca', type=str, default=None, help="Path to PCA result")
+    parser.add_argument('--midpca', type=str, default=None, help="Path to intermediate PCA result")
+    parser.add_argument('--finalpca', type=str, default=None, help="Path to final PCA result")
     parser.add_argument('--norm',default=None,choices=['minmax', 'z', 'gaussian',None])
 
     parser.add_argument('--subset', default="val")  #can be val or train (must have labels)
@@ -147,18 +166,18 @@ def main():
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
     args = parser.parse_args()
-
+    
 
     if not os.path.exists('results4.txt'):
             open('results4.txt', 'w').close()
     file = open('results4.txt', 'a')
 
-    if args.pca != None :
-        args.pca = '../' + args.pca
-
+    if args.midpca != None :
+        args.midpca = '../' + args.midpca
+    if args.finalpca != None :
+        args.finalpca = '../' + args.finalpca
     if args.stats != None :
         args.stats = '../' + args.stats
-
 
 
     path_list = [
@@ -166,7 +185,7 @@ def main():
         "D:/semester_3/AML/project/datasets/RoadObsticle21/images/*.webp",
         "D:/semester_3/AML/project/datasets/FS_LostFound_full/images/*.png",
         "D:/semester_3/AML/project/datasets/fs_static/images/*.jpg",
-        "D:/semester_3/AML/project/datasets/RoadAnomaly/images/*.jpg"
+        "D:/semester_3/AML/project/datasets/RoadAnomaly/images/*.jpg",
     ]
 
     if args.model == "bisenet" :
@@ -219,34 +238,43 @@ def main():
         state_dict = checkpoint
 
     model = load_my_state_dict(model, state_dict)
-    print ("✅Model and weights LOADED successfully")
+    print ("Model and weights LOADED successfully")
+
 
     
     try :
         stats = torch.load(args.stats)
-        mean = stats['mean']
-        cov = stats['cov']
         print(f"✅ Stats loaded successfully")
     except :
         print(f"❌ Couln't load stats")
 
 
-    if args.pca :
+    if args.midpca :
         try :
-            pca = joblib.load(args.pca)
-            print(f"✅ PCA loaded successfylly")
+            pca_mid = joblib.load(args.midpca)
+            print(f"✅ mid-PCA loaded successfylly")
         except :
-            print(f"❌ Couln't load PCA")
+            print(f"❌ Couln't load mid-PCA")
     else :
-        pca = None
+        pca_mid = None 
+
+    if args.finalpca :
+        try :
+            pca_final = joblib.load(args.finalpca)
+            print(f"✅ final-PCA loaded successfylly")
+        except :
+            print(f"❌ Couln't load final-PCA")
+    else :
+        pca_final = None 
+    
 
 
     model.eval()
 
     for current_path in path_list :
 
-        ood_gts_list = []
         anomaly_score_list = []
+        ood_gts_list = []
         
         print("args.input before globbing:", current_path)
 
@@ -292,50 +320,82 @@ def main():
         
         co_transform = MyCoTransform(enc=True, augment=False, height=512)
         resize_transform = transforms.Resize((512, 1024))
+        
 
         for path in current_path :
             print(path)
-
+    
             img = Image.open(path).convert("RGB")
             # img = resize_transform(img)
             # img_tensor, _ = co_transform(img, img)  # GT ignored
-            img_tensor = input_transform(img)
+            img_tensor = input_transform(img)     
+
             img_tensor = img_tensor.unsqueeze(0).to('cuda')
 
 
             with torch.no_grad():
-                features = model(img_tensor, only_encode=True)
+                early_feat, mid_feat, final_feat = model(img_tensor, multi_encode = True)
 
+           
+            H, W = img_tensor.shape[2], img_tensor.shape[3]
 
-            B, C, H, W = features.shape
-            features = features.permute(0, 2, 3, 1).reshape(-1, C)  # [H*W, 128]
+                
+            B_e, C_e, H_e, W_e = early_feat.shape
+            B_m, C_m, H_m, W_m = mid_feat.shape
+            B_f, C_f, H_f, W_f = final_feat.shape
+
+            early_feat = early_feat.permute(0, 2, 3, 1).reshape(-1, C_e)  # [H*W, 128]
+            mid_feat = mid_feat.permute(0, 2, 3, 1).reshape(-1, C_m)  # [H*W, 128]
+            final_feat = final_feat.permute(0, 2, 3, 1).reshape(-1, C_f)  # [H*W, 128]
+
 
 
             device = img_tensor.device
-            mean  = mean.to(device)
-            cov   = cov.to(device)
+            mean_early  = stats['mean_early'].to(device)
+            cov_early   = stats['cov_early'].to(device)
+            mean_mid    = stats['mean_mid'].to(device)
+            cov_mid     = stats['cov_mid'].to(device)
+            mean_final  = stats['mean_final'].to(device)
+            cov_final   = stats['cov_final'].to(device)
 
-            mahalanobis_map = mahalanobis_score(features, mean, cov, pca_model=pca).view(H,W)
 
-            # Optional: Upsample to original image size
-            mahalanobis_map = mahalanobis_map.unsqueeze(0).unsqueeze(0)  # [1, 1, 64, 128]
-            mahalanobis_map_up = F.interpolate(mahalanobis_map, size=(512, 1024), mode='bilinear', align_corners=False)
-            mahalanobis_map_up = mahalanobis_map_up.squeeze().cpu().numpy()  # [512, 1024] 
 
-            #min-max normalization suggestion to improve AUPRC
-            if args.norm == 'minmax' :
-                mahalanobis_map_up = (mahalanobis_map_up - mahalanobis_map_up.min()) / (mahalanobis_map_up.max() - mahalanobis_map_up.min() + 1e-8)
+            score_early = mahalanobis_score(early_feat, mean_early, cov_early).view(H_e,W_e)
+            score_mid   = mahalanobis_score(mid_feat, mean_mid, cov_mid,pca_model=pca_mid).view(H_m, W_m)
+            score_final = mahalanobis_score(final_feat, mean_final, cov_final,pca_model=pca_final).view(H_f, W_f)
 
-            #z-score normalization suggestion to improve AUPRC
-            if args.norm == 'z' :
-                mean = mahalanobis_map_up.mean()
-                std = mahalanobis_map_up.std()
-                mahalanobis_map_up = (mahalanobis_map_up - mean) / (std + 1e-8)
-
-            # Gaussian smoothing
-            if args.norm == 'gaussian' :
-                mahalanobis_map_up = cv2.GaussianBlur(mahalanobis_map_up, ksize=(3, 3), sigmaX=1.5)            
             
+
+            score_early_up = F.interpolate(score_early[None, None], size=(H, W), mode='bilinear', align_corners=False)[0, 0]
+            score_mid_up = F.interpolate(score_mid[None, None], size=(H, W), mode='bilinear', align_corners=False)[0, 0]
+            score_final_up = F.interpolate(score_final[None, None], size=(H, W), mode='bilinear', align_corners=False)[0, 0]
+
+
+            combined_score = (score_early_up + score_mid_up + score_final_up) / 3.0
+            # combined_score = torch.max(torch.stack([score_early_up, score_mid_up, score_final_up]), dim=0).values
+
+            
+            if isinstance(combined_score, torch.Tensor):
+                combined_score = combined_score.cpu().numpy()
+                
+        
+            # #min-max normalization suggestion to improve AUPRC
+            if args.norm == 'minmax' :
+                combined_score = (combined_score - combined_score.min()) / (combined_score.max() - combined_score.min() + 1e-8)
+
+
+            # #z-score normalization suggestion to improve AUPRC
+            if args.norm == 'z' :
+                mean = combined_score.mean()
+                std = combined_score.std()
+                combined_score = (combined_score - mean) / (std + 1e-8)
+
+
+            # # Gaussian smoothing
+            if args.norm == 'gaussian' :
+                combined_score = cv2.GaussianBlur(combined_score, ksize=(5, 5), sigmaX=1.5)
+
+
     
             pathGT = path.replace("images", "labels_masks")                
             if "RoadObsticle21" in pathGT:
@@ -348,8 +408,10 @@ def main():
             mask = Image.open(pathGT)
             # mask_resized = mask.resize((1024,512), resample=Image.NEAREST)
             mask_resized = target_transform(mask)
+
             ood_gts = np.array(mask_resized)
 
+            # print("oodgts shape ",ood_gts.shape)
 
             if "RoadAnomaly" in pathGT:
                 ood_gts = np.where((ood_gts==2), 1, ood_gts)
@@ -370,10 +432,9 @@ def main():
                 continue              
             else:
                 ood_gts_list.append(ood_gts)
-                anomaly_score_list.append(mahalanobis_map_up)
-            del features, mahalanobis_map_up, ood_gts, mask
+                anomaly_score_list.append(combined_score)
+            del  score_early, score_mid, score_final, combined_score, ood_gts, mask
             torch.cuda.empty_cache()
-
 
         file.write( "\n")
 

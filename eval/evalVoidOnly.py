@@ -38,14 +38,11 @@ def main():
     parser = ArgumentParser()
     parser.add_argument(
     "--input",
-    default="D:/semester_3/AML/project/datasets/RoadAnomaly/images/*.jpg",
+    default="D:/semester_3/AML/project/datasets/RoadAnomaly21/images/*.png",
     help="Glob pattern to match images"
 )
     parser.add_argument('--model',default="erfnet")
-    # parser.add_argument('--loadDir',default="../trained_models/")
-    # parser.add_argument('--loadWeights', default="erfnet_pretrained.pth")
 
-    parser.add_argument('--loadDir',default="../save/ENet_Cityscapes/")
     parser.add_argument('--subset', default="val")  #can be val or train (must have labels)
     parser.add_argument('--datadir', default=r"D:/semester 3/AML/project/datasets/cityscapes")
     parser.add_argument('--num-workers', type=int, default=4)
@@ -83,7 +80,7 @@ def main():
         weightspath = '../trained_models/ENet'
         loadModel = 'ENet'
     elif args.model == 'bisenet' :
-        weightspath = '../trained_models/checkpoint20.pth'
+        weightspath = '../trained_models/Checkpoint20_20.pth'
         loadModel = 'BiseNet'
 
 
@@ -169,13 +166,7 @@ def main():
                 result = result[0]
 
             logits = result.squeeze(0).data.cpu().numpy()  # shape: (C, H, W)
-            
-
-
-            # Let's assume class 19 is the Void class
-            # void_logits = logits[19]  # shape: (H, W)
-
-            # You can use either of the following anomaly scores:
+    
 
             # 1. Using MSP-style softmax for void class only
             exp_logits = np.exp(logits - np.max(logits, axis=0, keepdims=True))
@@ -185,8 +176,6 @@ def main():
             elif args.model == 'erfnet' :
                 anomaly_result = 1.0 - softmax[19]
 
-            # 2. Simpler: Use just the raw logit value (more common in literature for this)
-            # anomaly_result = void_logits  # Higher value = more likely to be Void
 
 
             

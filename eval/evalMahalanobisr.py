@@ -45,7 +45,7 @@ target_transform = Compose([
 ])
 
 
-def mahalanobis_score(features, mean, cov, pca_model=None):
+def mahalanobis_score(features, mean, inv_cov, pca_model=None):
 
     # Apply PCA if provided
     if pca_model is not None:
@@ -58,14 +58,12 @@ def mahalanobis_score(features, mean, cov, pca_model=None):
         features = torch.tensor(features, dtype=torch.float32)
     if not isinstance(mean, torch.Tensor):
         mean = torch.tensor(mean, dtype=torch.float32)
-    if not isinstance(cov, torch.Tensor):
-        cov = torch.tensor(cov, dtype=torch.float32)
+    if not isinstance(inv_cov, torch.Tensor):
+        inv_cov = torch.tensor(inv_cov, dtype=torch.float32)
 
     # Move mean and cov to the same device as features
     device = mean.device
     features = features.to(device)
-
-    inv_cov = torch.inverse(cov)
 
     # Compute Mahalanobis score
     delta = features - mean
@@ -137,7 +135,8 @@ def main():
     parser = ArgumentParser()
 
     parser.add_argument('--model',default="erfnet",choices=['erfnet', 'enet', 'bisenet'])
-    parser.add_argument('--stats')
+    parser.add_argument('--invcov',default='../inv_cov_reduced_80d.npy')
+    parser.add_argument('--mean',default='../mean_reduced_80d.npy')
     parser.add_argument('--pca', type=str, default=None, help="Path to PCA result")
     parser.add_argument('--norm',default=None,choices=['minmax', 'z', 'gaussian',None])
 
@@ -147,7 +146,7 @@ def main():
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
     args = parser.parse_args()
-
+    
 
     if not os.path.exists('results4.txt'):
             open('results4.txt', 'w').close()
@@ -155,9 +154,6 @@ def main():
 
     if args.pca != None :
         args.pca = '../' + args.pca
-
-    if args.stats != None :
-        args.stats = '../' + args.stats
 
 
 
@@ -219,17 +215,19 @@ def main():
         state_dict = checkpoint
 
     model = load_my_state_dict(model, state_dict)
-    print ("✅Model and weights LOADED successfully")
+    print ("Model and weights LOADED successfully")
 
-    
+
+    #
     try :
-        stats = torch.load(args.stats)
-        mean = stats['mean']
-        cov = stats['cov']
-        print(f"✅ Stats loaded successfully")
+      inv_cov = np.load(args.invcov)
+      mean = np.load(args.mean)
+      print(f"✅ Mean and inv_cov loaded successfully")
     except :
-        print(f"❌ Couln't load stats")
+      print(f"❌ Couln't load invcov or mean")
 
+    inv_cov = torch.from_numpy(inv_cov)
+    mean = torch.from_numpy(mean)
 
     if args.pca :
         try :
@@ -240,13 +238,18 @@ def main():
     else :
         pca = None
 
+    
+    co_transform = MyCoTransform(enc=True, augment=False, height=512)
+    resize_transform = transforms.Resize((512, 1024)) 
+    # 
+
 
     model.eval()
 
     for current_path in path_list :
-
-        ood_gts_list = []
+        
         anomaly_score_list = []
+        ood_gts_list = []
         
         print("args.input before globbing:", current_path)
 
@@ -288,34 +291,30 @@ def main():
             print("❌ No images found! Please check the --input path.")
             exit(1)
 
-
         
-        co_transform = MyCoTransform(enc=True, augment=False, height=512)
-        resize_transform = transforms.Resize((512, 1024))
 
         for path in current_path :
             print(path)
 
             img = Image.open(path).convert("RGB")
-            # img = resize_transform(img)
-            # img_tensor, _ = co_transform(img, img)  # GT ignored
-            img_tensor = input_transform(img)
+            img = resize_transform(img)
+            img_tensor, _ = co_transform(img, img)  # GT ignored
+            # img_tensor = input_transform(img)
             img_tensor = img_tensor.unsqueeze(0).to('cuda')
 
 
             with torch.no_grad():
                 features = model(img_tensor, only_encode=True)
 
-
+              
             B, C, H, W = features.shape
             features = features.permute(0, 2, 3, 1).reshape(-1, C)  # [H*W, 128]
 
-
             device = img_tensor.device
             mean  = mean.to(device)
-            cov   = cov.to(device)
+            inv_cov   = inv_cov.to(device)
 
-            mahalanobis_map = mahalanobis_score(features, mean, cov, pca_model=pca).view(H,W)
+            mahalanobis_map = mahalanobis_score(features, mean, inv_cov, pca_model=pca).view(H,W)
 
             # Optional: Upsample to original image size
             mahalanobis_map = mahalanobis_map.unsqueeze(0).unsqueeze(0)  # [1, 1, 64, 128]
@@ -324,17 +323,19 @@ def main():
 
             #min-max normalization suggestion to improve AUPRC
             if args.norm == 'minmax' :
-                mahalanobis_map_up = (mahalanobis_map_up - mahalanobis_map_up.min()) / (mahalanobis_map_up.max() - mahalanobis_map_up.min() + 1e-8)
+              mahalanobis_map_up = (mahalanobis_map_up - mahalanobis_map_up.min()) / (mahalanobis_map_up.max() - mahalanobis_map_up.min() + 1e-8)
+
 
             #z-score normalization suggestion to improve AUPRC
             if args.norm == 'z' :
-                mean = mahalanobis_map_up.mean()
-                std = mahalanobis_map_up.std()
-                mahalanobis_map_up = (mahalanobis_map_up - mean) / (std + 1e-8)
+              mean = mahalanobis_map_up.mean()
+              std = mahalanobis_map_up.std()
+              mahalanobis_map_up = (mahalanobis_map_up - mean) / (std + 1e-8)
+
 
             # Gaussian smoothing
             if args.norm == 'gaussian' :
-                mahalanobis_map_up = cv2.GaussianBlur(mahalanobis_map_up, ksize=(3, 3), sigmaX=1.5)            
+              mahalanobis_map_up = cv2.GaussianBlur(mahalanobis_map_up, ksize=(3, 3), sigmaX=1.5)            
             
     
             pathGT = path.replace("images", "labels_masks")                
@@ -380,8 +381,10 @@ def main():
         ood_gts = np.array(ood_gts_list)
         anomaly_scores = np.array(anomaly_score_list)
 
+        anomaly_score_list = []
+        ood_gts_list = []
 
-        # print("ood_gts unique ",np.unique(ood_gts))
+
 
         ood_mask = (ood_gts == 1)
         ind_mask = (ood_gts == 0)
@@ -397,7 +400,6 @@ def main():
 
         prc_auc = average_precision_score(val_label, val_out)
 
-        # print("Label unique values and counts:", np.unique(val_label, return_counts=True))
 
 
         if np.sum(val_label) == 0:

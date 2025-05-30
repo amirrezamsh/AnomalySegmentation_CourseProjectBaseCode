@@ -221,3 +221,21 @@ RoadAnomaly21     msp     1.0    AUPRC score:15.00455140099341   FPR@TPR95:94.65
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+RoadAnomaly21     msp     1.0    AUPRC score:9.462840525887401   FPR@TPR95:98.95293483729446
+RoadObsticle21     msp     1.0    AUPRC score:0.3795646424802625   FPR@TPR95:99.44734214152281

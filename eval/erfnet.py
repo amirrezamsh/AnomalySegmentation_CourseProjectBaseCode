@@ -84,16 +84,24 @@ class Encoder(nn.Module):
         #only for encoder mode:
         self.output_conv = nn.Conv2d(128, num_classes, 1, stride=1, padding=0, bias=True)
 
-    def forward(self, input, predict=False):
-        output = self.initial_block(input)
+    def forward(self, input, predict=False, return_features=False):
+        early = self.initial_block(input)
+        output = early
 
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             output = layer(output)
+
+            if i == 5:
+                mid = output
 
         if predict:
             output = self.output_conv(output)
 
-        return output
+        if return_features:
+            return early, mid, output
+        else:
+            return output
+
 
 
 class UpsamplerBlock (nn.Module):
@@ -144,9 +152,11 @@ class ERFNet(nn.Module):
             self.encoder = encoder
         self.decoder = Decoder(num_classes)
 
-    def forward(self, input, only_encode=False):
+    def forward(self, input, only_encode=False, multi_encode = False):
         if only_encode:
             return self.encoder.forward(input, predict=False)
+        elif multi_encode :
+            return self.encoder.forward(input, predict=False, return_features=True)
         else:
             output = self.encoder(input)    #predict=False by default
             return self.decoder.forward(output)
