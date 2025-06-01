@@ -135,8 +135,8 @@ def main():
     parser = ArgumentParser()
 
     parser.add_argument('--model',default="erfnet",choices=['erfnet', 'enet', 'bisenet'])
-    parser.add_argument('--invcov',default='../inv_cov_reduced_80d.npy')
-    parser.add_argument('--mean',default='../mean_reduced_80d.npy')
+    parser.add_argument('--invcov',default='../inv_cov_reduced_64d.npy')
+    parser.add_argument('--mean',default='../mean_reduced_64d.npy')
     parser.add_argument('--pca', type=str, default=None, help="Path to PCA result")
     parser.add_argument('--norm',default=None,choices=['minmax', 'z', 'gaussian',None])
 
@@ -364,7 +364,7 @@ def main():
                 ood_gts = np.where((ood_gts<20), 0, ood_gts)
                 ood_gts = np.where((ood_gts==255), 1, ood_gts)
 
-            # visualize_anomaly_detection(img,mahalanobis_map_up,ood_gts)
+            # visualize_anomaly_detection(img_tensor.squeeze(0),mahalanobis_map_up,ood_gts)
 
 
             if 1 not in np.unique(ood_gts):

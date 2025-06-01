@@ -24,8 +24,8 @@ class iouEval:
         #print ("X is cuda: ", x.is_cuda)
         #print ("Y is cuda: ", y.is_cuda)
 
-        print('min label:', y.min())
-        print('max label:', y.max())
+        # print('min label:', y.min())
+        # print('max label:', y.max())
         assert y.min() >= 0 and y.max() < 20
 
         if (x.is_cuda or y.is_cuda):

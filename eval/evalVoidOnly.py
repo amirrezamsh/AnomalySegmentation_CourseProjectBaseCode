@@ -20,6 +20,7 @@ import os.path as osp
 from argparse import ArgumentParser
 from ood_metrics import fpr_at_95_tpr, calc_metrics, plot_roc, plot_pr,plot_barcode
 from sklearn.metrics import roc_auc_score, roc_curve, auc, precision_recall_curve, average_precision_score
+import torch.nn.functional as F
 
 seed = 42
 
@@ -49,27 +50,20 @@ def main():
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
     args = parser.parse_args()
-    anomaly_score_list = []
-    ood_gts_list = []
-
-    print("args.input before globbing:", args.input)
-
-    dataset = ''
-    if 'FS_LostFound_full' in args.input :
-        dataset = 'FS_LostFound_full'
-    elif 'fs_static' in args.input :
-        dataset = 'fs_static'
-    elif 'RoadAnomaly21' in args.input :
-        dataset = 'RoadAnomaly21'
-    elif 'RoadAnomaly' in args.input :
-        dataset = 'RoadAnomaly'
-    elif 'RoadObsticle21' in args.input :
-        dataset = 'RoadObsticle21'
 
 
-    if not os.path.exists('results.txt'):
-        open('results.txt', 'w').close()
-    file = open('results.txt', 'a')
+    path_list = [
+        "D:/semester_3/AML/project/datasets/RoadAnomaly21/images/*.png",
+        "D:/semester_3/AML/project/datasets/RoadObsticle21/images/*.webp",
+        "D:/semester_3/AML/project/datasets/FS_LostFound_full/images/*.png",
+        "D:/semester_3/AML/project/datasets/fs_static/images/*.jpg",
+        "D:/semester_3/AML/project/datasets/RoadAnomaly/images/*.jpg"
+    ]
+
+    if not os.path.exists('results_void.txt'):
+        open('results_void.txt', 'w').close()
+    file = open('results_void.txt', 'a')
+
 
     loadModel = ''
 
@@ -130,126 +124,141 @@ def main():
     print ("Model and weights LOADED successfully")
     model.eval()
 
-    if "*" in args.input or "?" in args.input:  
-        expanded = glob.glob(args.input)
-    else:
-        expanded = [args.input]
+    for current_path in path_list :
+
+        anomaly_score_list = []
+        ood_gts_list = []
+
+        print("args.input before globbing:", current_path)
+
+        dataset = ''
+        if 'FS_LostFound_full' in current_path :
+            dataset = 'FS_LostFound_full'
+        elif 'fs_static' in current_path :
+            dataset = 'fs_static'
+        elif 'RoadAnomaly21' in current_path :
+            dataset = 'RoadAnomaly21'
+        elif 'RoadAnomaly' in current_path :
+            dataset = 'RoadAnomaly'
+        elif 'RoadObsticle21' in current_path :
+            dataset = 'RoadObsticle21'
 
 
-    print("Expanded files:")
-    for f in expanded:
-        print(f, "| isfile:", os.path.isfile(f))
-
-    # Only keep actual image files
-    valid_extensions = ['.png', '.jpg', '.jpeg', '.webp', '.bmp']
-    args.input = [
-        f for f in expanded 
-        if f.lower().endswith(tuple(valid_extensions)) and os.path.isfile(f)
-    ]
-
-    print(f"✅ Found {len(args.input)} valid image(s) to process.")
-
-
-
-    if len(args.input) == 0:
-        print("❌ No images found! Please check the --input path.")
-        exit(1)
-        # for path in glob.glob(os.path.expanduser(str(args.input[0]))):
-    for path in args.input :
-        print(path)
-        images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
-        images = images.permute(0,3,1,2)
-        with torch.no_grad():
-            result = model(images)
-
-            if isinstance(result, tuple):
-                result = result[0]
-
-            logits = result.squeeze(0).data.cpu().numpy()  # shape: (C, H, W)
-    
-
-            # 1. Using MSP-style softmax for void class only
-            exp_logits = np.exp(logits - np.max(logits, axis=0, keepdims=True))
-            softmax = exp_logits / np.sum(exp_logits, axis=0, keepdims=True)
-            if args.model =='bisenet' or args.model == 'enet' :
-                anomaly_result = 1.0 - softmax[0]
-            elif args.model == 'erfnet' :
-                anomaly_result = 1.0 - softmax[19]
-
-
-
-            
-   
-        pathGT = path.replace("images", "labels_masks")                
-        if "RoadObsticle21" in pathGT:
-           pathGT = pathGT.replace("webp", "png")
-        if "fs_static" in pathGT:
-           pathGT = pathGT.replace("jpg", "png")                
-        if "RoadAnomaly" in pathGT:
-           pathGT = pathGT.replace("jpg", "png")  
-
-        mask = Image.open(pathGT)
-        ood_gts = np.array(mask)
-
-        if "RoadAnomaly" in pathGT:
-            ood_gts = np.where((ood_gts==2), 1, ood_gts)
-        if "LostAndFound" in pathGT:
-            ood_gts = np.where((ood_gts==0), 255, ood_gts)
-            ood_gts = np.where((ood_gts==1), 0, ood_gts)
-            ood_gts = np.where((ood_gts>1)&(ood_gts<201), 1, ood_gts)
-
-        if "Streethazard" in pathGT:
-            ood_gts = np.where((ood_gts==14), 255, ood_gts)
-            ood_gts = np.where((ood_gts<20), 0, ood_gts)
-            ood_gts = np.where((ood_gts==255), 1, ood_gts)
-
-        if 1 not in np.unique(ood_gts):
-            continue              
+        if "*" in current_path or "?" in current_path:  
+            expanded = glob.glob(current_path)
         else:
-             ood_gts_list.append(ood_gts)
-             anomaly_score_list.append(anomaly_result)
-        del result, anomaly_result, ood_gts, mask
-        torch.cuda.empty_cache()
+            expanded = [current_path]
 
-    file.write( "\n")
 
-    ood_gts = np.array(ood_gts_list)
-    anomaly_scores = np.array(anomaly_score_list)
+        print("Expanded files:")
+        for f in expanded:
+            print(f, "| isfile:", os.path.isfile(f))
 
-    ood_mask = (ood_gts == 1)
-    ind_mask = (ood_gts == 0)
+        # Only keep actual image files
+        valid_extensions = ['.png', '.jpg', '.jpeg', '.webp', '.bmp']
+        current_path = [
+            f for f in expanded 
+            if f.lower().endswith(tuple(valid_extensions)) and os.path.isfile(f)
+        ]
 
-    ood_out = anomaly_scores[ood_mask]
-    ind_out = anomaly_scores[ind_mask]
+        print(f"✅ Found {len(current_path)} valid image(s) to process.")
 
-    ood_label = np.ones(len(ood_out))
-    ind_label = np.zeros(len(ind_out))
+
+
+        if len(current_path) == 0:
+            print("❌ No images found! Please check the --input path.")
+            exit(1)
+            # for path in glob.glob(os.path.expanduser(str(args.input[0]))):
+        for path in current_path :
+            print(path)
+            images = torch.from_numpy(np.array(Image.open(path).convert('RGB'))).unsqueeze(0).float()
+            images = images.permute(0,3,1,2)
+            with torch.no_grad():
+                result = model(images)
+
+                if isinstance(result, tuple):
+                    result = result[0]
+
+                logits = result.squeeze(0).data.cpu().numpy()  # shape: (C, H, W)
+        
+
+                if args.model == 'erfnet' :
+                      softmax_probs = F.softmax(result, dim=1)  # Shape: [B, C, H, W]
+                      void_prob = softmax_probs[:, 19, :, :] 
+                      void_prob_np = void_prob.squeeze(0).data.cpu().numpy()
+                      anomaly_result = void_prob_np
+                elif args.model == 'bisenet' or args.model == 'enet' :
+                    softmax_probs = F.softmax(result , dim=1)  # Shape: [B, C, H, W]
+                    void_prob = softmax_probs[:, 0, :, :] 
+                    void_prob_np = void_prob.squeeze(0).data.cpu().numpy()
+                    anomaly_result = void_prob_np
+
+
+                
     
-    val_out = np.concatenate((ind_out, ood_out))
-    val_label = np.concatenate((ind_label, ood_label))
+            pathGT = path.replace("images", "labels_masks")                
+            if "RoadObsticle21" in pathGT:
+                pathGT = pathGT.replace("webp", "png")
+            if "fs_static" in pathGT:
+                pathGT = pathGT.replace("jpg", "png")                
+            if "RoadAnomaly" in pathGT:
+                pathGT = pathGT.replace("jpg", "png")  
 
-    print("val_label shape:", val_label.shape)
-    print("val_label values:", val_label.flatten()[:10])
+            mask = Image.open(pathGT)
+            ood_gts = np.array(mask)
 
-    print("val_out shape:", val_out.shape)
-    print("val_out values:", val_out.flatten()[:10])
+            if "RoadAnomaly" in pathGT:
+                ood_gts = np.where((ood_gts==2), 1, ood_gts)
+            if "LostAndFound" in pathGT:
+                ood_gts = np.where((ood_gts==0), 255, ood_gts)
+                ood_gts = np.where((ood_gts==1), 0, ood_gts)
+                ood_gts = np.where((ood_gts>1)&(ood_gts<201), 1, ood_gts)
+
+            if "Streethazard" in pathGT:
+                ood_gts = np.where((ood_gts==14), 255, ood_gts)
+                ood_gts = np.where((ood_gts<20), 0, ood_gts)
+                ood_gts = np.where((ood_gts==255), 1, ood_gts)
+
+            if 1 not in np.unique(ood_gts):
+                continue              
+            else:
+                ood_gts_list.append(ood_gts)
+                anomaly_score_list.append(anomaly_result)
+            del result, anomaly_result, ood_gts, mask
+            torch.cuda.empty_cache()
+
+        file.write( "\n")
+
+        ood_gts = np.array(ood_gts_list)
+        anomaly_scores = np.array(anomaly_score_list)
+
+        ood_mask = (ood_gts == 1)
+        ind_mask = (ood_gts == 0)
+
+        ood_out = anomaly_scores[ood_mask]
+        ind_out = anomaly_scores[ind_mask]
+
+        ood_label = np.ones(len(ood_out))
+        ind_label = np.zeros(len(ind_out))
+        
+        val_out = np.concatenate((ind_out, ood_out))
+        val_label = np.concatenate((ind_label, ood_label))
 
 
-    prc_auc = average_precision_score(val_label, val_out)
-
-    print("Label unique values and counts:", np.unique(val_label, return_counts=True))
+        prc_auc = average_precision_score(val_label, val_out)
 
 
-    if np.sum(val_label) == 0:
-        print("No positive labels in validation set — skipping FPR@95")
-    else:
-        fpr = fpr_at_95_tpr(val_label, val_out)
+
+        if np.sum(val_label) == 0:
+            print("No positive labels in validation set — skipping FPR@95")
+        else:
+            fpr = fpr_at_95_tpr(val_label, val_out)
 
 
-    print(f'AUPRC score: {prc_auc*100.0}')
-    print(f'FPR@TPR95: {fpr*100.0}')
+        print(f'AUPRC score: {prc_auc*100.0}')
+        print(f'FPR@TPR95: {fpr*100.0}')
 
-    # file.write((args.model + '     ' + dataset + '     ' + '    AUPRC score:' + str(prc_auc*100.0) + '   FPR@TPR95:' + str(fpr*100.0) ))
+        file.write((args.model + '     ' + dataset + '     ' + '    AUPRC score:' + str(prc_auc*100.0) + '   FPR@TPR95:' + str(fpr*100.0) ))
     file.close()
 
 

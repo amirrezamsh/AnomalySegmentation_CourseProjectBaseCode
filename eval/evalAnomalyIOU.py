@@ -1,3 +1,4 @@
+
 # Copyright (c) OpenMMLab. All rights reserved.
 import sys
 import os
@@ -15,20 +16,24 @@ from argparse import ArgumentParser
 from ood_metrics import fpr_at_95_tpr, calc_metrics, plot_roc, plot_pr,plot_barcode
 from sklearn.metrics import roc_auc_score, roc_curve, auc, precision_recall_curve, average_precision_score
 from torchvision.transforms import Compose, ToTensor, Resize
+from iouEval import iouEval, getColorEntry
 
 from models.enet import ENet
 from models.bisenetv2 import BiSeNetV2
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
 
-input_transform = Compose([
-    Resize((512, 1024), interpolation=Image.BILINEAR),
-    ToTensor()
-])
+def visualize_binary_tensor(tensor):
+    # If input is a torch tensor, convert to numpy
+    if isinstance(tensor, torch.Tensor):
+        tensor = tensor.cpu().numpy()
+    
+    plt.imshow(tensor, cmap='gray')  # 0=black, 1=white
+    plt.axis('off')
+    plt.show()
 
-target_transform = Compose([
-    Resize((512, 1024), interpolation=Image.NEAREST)
-])
+
 
 
 seed = 42
@@ -53,6 +58,7 @@ def main():
     parser.add_argument('--model',default="erfnet",choices=['erfnet', 'enet', 'bisenet'])
     
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for scaling logits (used in MSP)')
+    parser.add_argument('--void', action='store_true', help='Use Void class for anomaly detection')
 
 
     parser.add_argument('--subset', default="val")  #can be val or train (must have labels)
@@ -61,6 +67,13 @@ def main():
     parser.add_argument('--batch-size', type=int, default=1)
     parser.add_argument('--cpu', action='store_true')
     args = parser.parse_args()
+
+    if args.void :
+        if args.method == 'msp' :
+            print("✅ Void setup activated")
+        else :
+            print("❌ On void setup you should set the method to msp")
+            sys.exit(1)
 
 
     path_list = [
@@ -71,9 +84,9 @@ def main():
         "D:/semester_3/AML/project/datasets/RoadAnomaly/images/*.jpg"
     ]
 
-    if not os.path.exists('results.txt'):
-        open('results.txt', 'w').close()
-    file = open('results.txt', 'a')
+    # if not os.path.exists('results.txt'):
+    #     open('results.txt', 'w').close()
+    # file = open('results.txt', 'a')
 
 
     if args.model == "bisenet" :
@@ -128,13 +141,18 @@ def main():
     model = load_my_state_dict(model, state_dict)
     print ("Model and weights LOADED successfully")
 
+    IGNORE_INDEX = 2
+    PERCENTILE = 95
+
+    iouEvalVal_overall = iouEval(nClasses = 3, ignoreIndex = IGNORE_INDEX )
+
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
     for current_path in path_list :
-
-        anomaly_score_list = []
-        ood_gts_list = []
-
+        
+        iouEvalVal_dataset = iouEval(nClasses = 3, ignoreIndex = IGNORE_INDEX )
 
         print("args.input before globbing:", current_path)
 
@@ -192,34 +210,48 @@ def main():
             if isinstance(result, tuple):
                 result = result[0]
 
-            ##### first I tried this #####
-            # anomaly_result = 1.0 - np.max(result.squeeze(0).data.cpu().numpy(), axis=0)
-            ##### first I tried this #####
 
             logits = result.squeeze(0).data.cpu().numpy()
 
 
             if args.method == "msp" :
                 temperature = getattr(args, 'temperature', 1.0)
-                # Apply temperature scaling to logits
-                scaled_logits = logits / temperature
-                # Softmax over channel dimension (axis=0)
-                # exp_logits = np.exp(scaled_logits - np.max(scaled_logits, axis=0, keepdims=True))  # for stability
-                # softmax = exp_logits / np.sum(exp_logits, axis=0, keepdims=True)
-                # anomaly_result = 1.0 - np.max(softmax, axis=0)
 
+                if args.void :
+                    if args.model == 'erfnet' :
+                      softmax_probs = F.softmax(result / temperature, dim=1)  # Shape: [B, C, H, W]
+                      void_prob = softmax_probs[:, 19, :, :] 
+                      void_prob_np = void_prob.squeeze(0).data.cpu().numpy()
+                      anomaly_result = void_prob_np
+                    elif args.model == 'bisenet' or args.model == 'enet' :
+                        softmax_probs = F.softmax(result / temperature, dim=1)  # Shape: [B, C, H, W]
+                        void_prob = softmax_probs[:, 0, :, :] 
+                        void_prob_np = void_prob.squeeze(0).data.cpu().numpy()
+                        anomaly_result = void_prob_np
+                        
+                  
+                else :
+                  softmax_probs = F.softmax(result / temperature, dim=1)  # Shape: [B, C, H, W]
+                  msp, predicted = torch.max(softmax_probs, dim=1)  # Shape: [B, H, W]
+                  anomaly_result = 1 - msp
+                  anomaly_result = anomaly_result.squeeze(0).data.cpu().numpy()
 
-                softmax_probs = F.softmax(result / temperature, dim=1)  # Shape: [B, C, H, W]
-                msp, predicted = torch.max(softmax_probs, dim=1)  # Shape: [B, H, W]
-                anomaly_result = 1 - msp
-                anomaly_result = anomaly_result.squeeze(0).data.cpu().numpy()
                 
-                # print("anomaly result shape ",anomaly_result.shape)
-            
+                # static threshold
+                # anomaly_result = (anomaly_result - anomaly_result.min()) / (anomaly_result.max() - anomaly_result.min() + 1e-8)
+                # threshold = 0.5
+                # binary_map = (anomaly_result > threshold).astype(np.uint8) 
+
+                # percentile based
+                threshold = np.percentile(anomaly_result, PERCENTILE)
+                binary_map = (anomaly_result > threshold).astype(np.uint8)
+
 
             elif args.method == "maxlogit" :
                 # MaxLogit anomaly score
                 anomaly_result = -np.max(logits, axis=0)  # shape: (H, W)
+                threshold = np.percentile(anomaly_result, PERCENTILE)
+                binary_map = (anomaly_result > threshold).astype(np.uint8)
 
             elif args.method == "entropy" :
                 # logits = result.squeeze(0).data.cpu().numpy()  # shape: (C, H, W)
@@ -246,6 +278,12 @@ def main():
                 # 4) Squeeze batch dim and convert to NumPy if needed
                 anomaly_result = entropy_map.squeeze(0).cpu().numpy()  # → [720, 1280]
 
+                threshold = np.percentile(anomaly_result, PERCENTILE)
+                binary_map = (anomaly_result > threshold).astype(np.uint8)
+
+
+            # visualize_binary_tensor(binary_map)
+
 
             pathGT = path.replace("images", "labels_masks")                
             if "RoadObsticle21" in pathGT:
@@ -256,7 +294,6 @@ def main():
                 pathGT = pathGT.replace("jpg", "png")  
 
             mask = Image.open(pathGT)
-
             ood_gts = np.array(mask)
 
             if "RoadAnomaly" in pathGT:
@@ -273,51 +310,31 @@ def main():
 
 
 
-            if 1 not in np.unique(ood_gts):
+            ood_gts[ood_gts == 255] = IGNORE_INDEX
+
+            binary_map = torch.from_numpy(binary_map).unsqueeze(0).unsqueeze(0).to(device).long()
+            ood_gts = torch.from_numpy(ood_gts).unsqueeze(0).unsqueeze(0).to(device).long()
+
+
+            ood_gts_np = ood_gts.cpu().numpy()
+
+
+            if 1 not in np.unique(ood_gts_np):
                 continue              
             else:
-                ood_gts_list.append(ood_gts)
-                anomaly_score_list.append(anomaly_result)
+              iouEvalVal_overall.addBatch(binary_map, ood_gts)
+              iouEvalVal_dataset.addBatch(binary_map, ood_gts)
             del result, anomaly_result, ood_gts, mask
-            torch.cuda.empty_cache()
+            torch.cuda.empty_cache()      
 
-        file.write( "\n")
-
-        ood_gts = np.array(ood_gts_list)
-        anomaly_scores = np.array(anomaly_score_list)
-
-        # print("ood_gts unique ",np.unique(ood_gts))
-
-        ood_mask = (ood_gts == 1)
-        ind_mask = (ood_gts == 0)
-
-        ood_out = anomaly_scores[ood_mask]
-        ind_out = anomaly_scores[ind_mask]
-
-        ood_label = np.ones(len(ood_out))
-        ind_label = np.zeros(len(ind_out))
-        
-        val_out = np.concatenate((ind_out, ood_out))
-        val_label = np.concatenate((ind_label, ood_label))
+        iouVal_dataset, iou_classes_dataset = iouEvalVal_dataset.getIoU()
+        iouStr = getColorEntry(iouVal_dataset)+'{:0.2f}'.format(iouVal_dataset*100) + '\033[0m'
+        print (f"MEAN IoU for dataset {dataset}: {iouStr}% ")
+    iouVal, iou_classes = iouEvalVal_overall.getIoU()
 
 
-
-        prc_auc = average_precision_score(val_label, val_out)
-
-        print("Label unique values and counts:", np.unique(val_label, return_counts=True))
-
-
-        if np.sum(val_label) == 0:
-            print("No positive labels in validation set — skipping FPR@95")
-        else:
-            fpr = fpr_at_95_tpr(val_label, val_out)
-
-
-        print(f'AUPRC score: {prc_auc*100.0}')
-        print(f'FPR@TPR95: {fpr*100.0}')
-
-        file.write((dataset + '     ' + args.method + '     ' + str(args.temperature) + '    AUPRC score:' + str(prc_auc*100.0) + '   FPR@TPR95:' + str(fpr*100.0) ))
-    file.close()
+    iouStr = getColorEntry(iouVal)+'{:0.2f}'.format(iouVal*100) + '\033[0m'
+    print (f"Overall MEAN IoU based on {args.method} with temp {args.temperature}: {iouStr}%")
 
 
 if __name__ == '__main__':

@@ -2,6 +2,8 @@ import sys
 import os
 # Add project root to PYTHONPATH
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '.')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 from argparse import ArgumentParser
 from models.enet import ENet
 from models.bisenetv2 import BiSeNetV2
@@ -12,6 +14,39 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import cv2
 from torchvision.transforms import Compose, Resize, ToTensor, Normalize
+import joblib
+from eval.erfnet import ERFNet
+from torchvision.transforms import functional as TF
+
+
+
+def mahalanobis_score(features, mean, inv_cov, pca_model=None):
+
+    # Apply PCA if provided
+    if pca_model is not None:
+        if isinstance(features, torch.Tensor):
+            features = features.cpu().numpy()
+        features = pca_model.transform(features)
+
+    # Convert everything to torch tensors
+    if not isinstance(features, torch.Tensor):
+        features = torch.tensor(features, dtype=torch.float32)
+    if not isinstance(mean, torch.Tensor):
+        mean = torch.tensor(mean, dtype=torch.float32)
+    if not isinstance(inv_cov, torch.Tensor):
+        inv_cov = torch.tensor(inv_cov, dtype=torch.float32)
+
+    # Move mean and cov to the same device as features
+    device = mean.device
+    features = features.to(device)
+
+    # Compute Mahalanobis score
+    delta = features - mean
+    scores = torch.einsum('nd,dd,nd->n', delta, inv_cov, delta)
+    return scores
+
+
+
 
 
 
@@ -25,15 +60,70 @@ bisenet_img_transform = Compose([
                     std=[0.229, 0.224, 0.225]),
     ])
 
+erfnet_input_transform = Compose([
+    Resize((512, 1024), interpolation=Image.BILINEAR),
+    ToTensor()
+])
+
+erfnet_target_transform = Compose([
+    Resize((512, 1024), interpolation=Image.NEAREST)
+])
+
+def visualize_anomaly_detection(input_image, mahalanobis_map, gt_mask, title=None):
+    """
+    input_image: PIL Image or tensor [3, H, W]
+    mahalanobis_map: tensor [H, W] — normalized [0, 1]
+    gt_mask: numpy array or tensor [H, W] — 1 for OOD, 0 for in-dist
+    """
+    # Convert input image to displayable format if it's a tensor
+    if isinstance(input_image, torch.Tensor):
+        if input_image.dim() == 3:
+            input_image = TF.to_pil_image(input_image.cpu())
+        else:
+            raise ValueError("Expected 3D tensor for input image")
+
+    # Convert tensors to numpy arrays
+    if isinstance(mahalanobis_map, torch.Tensor):
+        mahalanobis_map = mahalanobis_map.detach().cpu().numpy()
+    if isinstance(gt_mask, torch.Tensor):
+        gt_mask = gt_mask.detach().cpu().numpy()
+
+    # Create figure
+    plt.figure(figsize=(15, 5))
+    
+    plt.subplot(1, 3, 1)
+    plt.imshow(input_image)
+    plt.title("Input Image")
+    plt.axis("off")
+
+    plt.subplot(1, 3, 2)
+    plt.imshow(mahalanobis_map, cmap='viridis')
+    plt.colorbar()
+    plt.title("Mahalanobis Map")
+
+    plt.subplot(1, 3, 3)
+    plt.imshow(gt_mask, cmap='gray')
+    plt.title("GT OOD Mask")
+    plt.axis("off")
+
+    if title:
+        plt.suptitle(title, fontsize=16)
+
+    plt.tight_layout()
+    plt.show()
+
 
 
 def main():
     parser = ArgumentParser()
     
-    parser.add_argument('--method', default='msp', choices=['msp', 'maxlogit', 'entropy'],
+    parser.add_argument('--method', default='msp', choices=['msp', 'maxlogit', 'entropy','mahalanobis'],
                     help="Anomaly scoring method: msp, maxlogit, or entropy")
-    
     parser.add_argument('--model',default="erfnet",choices=['erfnet', 'enet', 'bisenet'])
+
+    parser.add_argument('--invcov',default='./inv_cov_reduced_64d.npy')
+    parser.add_argument('--mean',default='./mean_reduced_64d.npy')
+    parser.add_argument('--pca', type=str, default=None, help="Path to PCA result")
 
     parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for scaling logits (used in MSP)')
     args = parser.parse_args()
@@ -52,7 +142,7 @@ def main():
 
     if args.model == "erfnet" :
         print("model is erfnet")
-        # model = ERFNet(NUM_CLASSES)
+        model = ERFNet(NUM_CLASSES)
     elif args.model == "enet" :
         print("model is enet")
         model = ENet(NUM_CLASSES)
@@ -88,37 +178,71 @@ def main():
     model = load_my_state_dict(model, state_dict)
     print ("Model and weights LOADED successfully")
 
+
+    if args.method == 'mahalanobis' :
+        try :
+            inv_cov = np.load(args.invcov)
+            mean = np.load(args.mean)
+            print(f"✅ Mean and inv_cov loaded successfully")
+        except :
+            print(f"❌ Couln't load invcov or mean")
+
+        inv_cov = torch.from_numpy(inv_cov)
+        mean = torch.from_numpy(mean)
+
+        if args.pca :
+            try :
+                pca = joblib.load(args.pca)
+                print(f"✅ PCA loaded successfylly")
+            except :
+                print(f"❌ Couln't load PCA")
+        else :
+            pca = None
+
+    
+
+
     model = model.eval().to(device)
 
-    img_path  = r"D:\semester_3\AML\project\datasets\RoadAnomaly21\images\7.png"
+    img_path  = r"D:\semester_3\AML\project\datasets\RoadObsticle21\images\23.webp"
     
     image = torch.from_numpy(np.array(Image.open(img_path).convert('RGB'))).unsqueeze(0).float()
-    image = image.permute(0,3,1,2)
+    image = image.permute(0,3,1,2) #B,C,H,W
     image = image.to(device)
 
         
 
-    # 
-    # image = Image.open(img_path).convert("RGB")  # Ensure it's in RGB mode
-
-    # # Apply the transform
-    # transformed_image = bisenet_img_transform(image)
-
-    # # If your model expects a batch, add a batch dimension
-    # transformed_image = transformed_image.unsqueeze(0)
-    # transformed_image = transformed_image.to(device)
-
-    # 
-
     with torch.no_grad():
-        result = model(image)
+        if args.method == 'mahalanobis' and args.model == 'erfnet' :
+            result = model(image,only_encode = True)
+        else :
+            result = model(image)
         
         if isinstance(result, tuple):
             result = result[0]
 
-        logits = result.squeeze(0).data.cpu().numpy()
+        if args.method == 'mahalanobis' and args.model == 'erfnet' :
+            B, C, H, W = result.shape
+            result = result.permute(0, 2, 3, 1).reshape(-1, C)  # [H*W, 128]
 
-        if args.method == "msp" :
+            device = image.device
+            mean  = mean.to(device)
+            inv_cov   = inv_cov.to(device)
+
+            mahalanobis_map = mahalanobis_score(result, mean, inv_cov, pca_model=pca).view(H,W)
+
+            # Optional: Upsample to original image size
+            mahalanobis_map = mahalanobis_map.unsqueeze(0).unsqueeze(0)  
+            mahalanobis_map_up = F.interpolate(mahalanobis_map, size=(image.shape[2], image.shape[3]), mode='bilinear', align_corners=False)
+            mahalanobis_map_up = mahalanobis_map_up.squeeze().cpu().numpy() 
+            anomaly_result = mahalanobis_map_up
+
+
+
+        
+
+        elif args.method == "msp" :
+          logits = result.squeeze(0).data.cpu().numpy()
           temperature = getattr(args, 'temperature', 1.0)
 
           softmax_probs = F.softmax(result / temperature, dim=1)  # Shape: [B, C, H, W]
@@ -126,11 +250,11 @@ def main():
           anomaly_result = msp
           anomaly_result = anomaly_result.squeeze(0).data.cpu().numpy()
           
-          print("anomaly result shape ",anomaly_result.shape)
 
 
         elif args.method == "maxlogit" :
             # MaxLogit anomaly score
+            logits = result.squeeze(0).data.cpu().numpy()
             anomaly_result = -np.max(logits, axis=0)  # shape: (H, W)
 
         elif args.method == "entropy" :

@@ -144,7 +144,6 @@ def main(args):
 
 
     if (not args.cpu):
-        # print("---------------------")
         model = torch.nn.DataParallel(model).cuda()
 
     def load_my_state_dict(model, state_dict):  #custom function to load model when not all dict elements
@@ -207,13 +206,8 @@ def main(args):
             images = images.cuda()
             labels = labels.cuda()
 
-        # img = images[0]
-        # print("min/max per channel:", img.view(3, -1).min(1)[0], img.view(3, -1).max(1)[0])
-        # print("mean/std per channel:", img.view(3, -1).mean(1), img.view(3, -1).std(1))
 
         print("filename : ",filename)
-        # print("images shape: ",images.shape)
-        # print("labels shape: ",labels.shape)
 
 
         inputs = Variable(images)
@@ -223,7 +217,6 @@ def main(args):
             if isinstance(outputs, tuple):
                 outputs = outputs[0]
 
-        preds = outputs.argmax(1).unsqueeze(1)  # shape: (B,1,H,W)
 
         if args.model == 'enet' :
             # Prepare labels
@@ -243,14 +236,9 @@ def main(args):
             preds = preds - 1
             preds[preds == -1] = 19  # match label remapping
 
-            
-            # labels[labels == 255] = 19
-            # print("preds shape ",preds.shape)
-            # print("labels shape ",labels.shape)
 
         # Feed to IoU computation
         iouEvalVal.addBatch(preds, labels)
-
 
         filenameSave = filename[0].split("leftImg8bit/")[1] 
 

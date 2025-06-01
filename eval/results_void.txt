@@ -1,0 +1,18 @@
+
+erfnet     RoadAnomaly21         AUPRC score:14.687342252587998   FPR@TPR95:100.0
+erfnet     RoadObsticle21         AUPRC score:0.674684569809698   FPR@TPR95:100.0
+erfnet     FS_LostFound_full         AUPRC score:0.27659889991771813   FPR@TPR95:100.0
+erfnet     fs_static         AUPRC score:1.783785872378039   FPR@TPR95:100.0
+erfnet     RoadAnomaly         AUPRC score:9.663645209144855   FPR@TPR95:100.0
+
+bisenet     RoadAnomaly21         AUPRC score:13.283862962587214   FPR@TPR95:100.0
+bisenet     RoadObsticle21         AUPRC score:0.45568356787214137   FPR@TPR95:100.0
+bisenet     FS_LostFound_full         AUPRC score:0.23122072801608134   FPR@TPR95:98.58150515335792
+bisenet     fs_static         AUPRC score:2.3398552451882204   FPR@TPR95:93.15723444537201
+bisenet     RoadAnomaly         AUPRC score:7.482733367028901   FPR@TPR95:97.11005429192421
+
+enet     RoadAnomaly21         AUPRC score:14.803342370344009   FPR@TPR95:100.0
+enet     RoadObsticle21         AUPRC score:0.674684569809698   FPR@TPR95:100.0
+enet     FS_LostFound_full         AUPRC score:0.2824830538306107   FPR@TPR95:100.0
+enet     fs_static         AUPRC score:2.0623263525911057   FPR@TPR95:100.0
+enet     RoadAnomaly         AUPRC score:10.264353554683987   FPR@TPR95:100.0

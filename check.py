@@ -54,7 +54,7 @@ def main(args):
 
     # enet_weightspath = "./trained_models/ENet" 
     enet_weightspath = "./trained_models/enet252.pth" 
-    bisenet_weightspath = "./trained_models/checkpoint20.pth" 
+    bisenet_weightspath = "./trained_models/Checkpoint20_20.pth" 
     erfnet_weightspath = "./trained_models/erfnet_pretrained.pth" 
 
     N_CLASSES = 20
